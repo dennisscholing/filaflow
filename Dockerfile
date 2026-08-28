@@ -16,7 +16,7 @@ COPY hooks ./hooks
 COPY lib ./lib
 COPY public ./public
 COPY .openai ./.openai
-COPY components.json next.config.ts tsconfig.json vite.config.ts .oxfmtrc.json .oxlintrc.json ./
+COPY components.json next.config.ts tsconfig.json vite.config.ts vite.spa.config.ts .oxfmtrc.json .oxlintrc.json ./
 RUN npm run build:spa
 
 FROM python:3.12-slim-bookworm AS runtime
