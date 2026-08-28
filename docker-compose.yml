@@ -1,0 +1,94 @@
+name: filaflow
+
+services:
+  app:
+    image: ${FILAFLOW_IMAGE}
+    container_name: filaflow-app
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      FILAFLOW_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-filaflow}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-filaflow}
+      FILAFLOW_SECRET_KEY: ${FILAFLOW_SECRET_KEY}
+      FILAFLOW_BOOTSTRAP_ADMIN_EMAIL: ${FILAFLOW_ADMIN_EMAIL}
+      FILAFLOW_BOOTSTRAP_ADMIN_PASSWORD: ${FILAFLOW_ADMIN_PASSWORD}
+      FILAFLOW_PUBLIC_URL: ${FILAFLOW_PUBLIC_URL:-http://localhost:9000}
+      FILAFLOW_COOKIE_SECURE: ${FILAFLOW_COOKIE_SECURE:-false}
+      FILAFLOW_FORWARDED_ALLOW_IPS: ${FILAFLOW_FORWARDED_ALLOW_IPS:-127.0.0.1}
+    ports:
+      - "${FILAFLOW_PORT:-9000}:9000"
+    volumes:
+      - ${FILAFLOW_DATA_ROOT:-/volume1/docker/filaflow}/config:/config
+    networks:
+      - frontend
+      - database
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  db:
+    image: postgres:17-alpine
+    container_name: filaflow-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-filaflow}
+      POSTGRES_USER: ${POSTGRES_USER:-filaflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ${FILAFLOW_DATA_ROOT:-/volume1/docker/filaflow}/postgres:/var/lib/postgresql/data
+    networks:
+      - database
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-filaflow} -d ${POSTGRES_DB:-filaflow}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  backup:
+    image: postgres:17-alpine
+    container_name: filaflow-backup
+    restart: unless-stopped
+    user: "70:70"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGHOST: db
+      PGDATABASE: ${POSTGRES_DB:-filaflow}
+      PGUSER: ${POSTGRES_USER:-filaflow}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      BACKUP_DAILY_KEEP: ${BACKUP_DAILY_KEEP:-7}
+      BACKUP_WEEKLY_KEEP: ${BACKUP_WEEKLY_KEEP:-4}
+      BACKUP_HOUR: ${BACKUP_HOUR:-2}
+    volumes:
+      - ${FILAFLOW_DATA_ROOT:-/volume1/docker/filaflow}/backups:/backups
+      - ./deploy/backup.sh:/usr/local/bin/filaflow-backup:ro
+    entrypoint: ["/bin/sh", "/usr/local/bin/filaflow-backup"]
+    networks:
+      - database
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+networks:
+  frontend:
+  database:
+    internal: true
