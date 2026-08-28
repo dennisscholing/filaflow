@@ -31,7 +31,7 @@ jobs:
     env:
       PYTHONPATH: backend
       FILAFLOW_DATABASE_URL: postgresql+psycopg://filaflow:test-database-password@127.0.0.1:5432/filaflow_test
-      FILAFLOW_CONFIG_DIR: ${{ runner.temp }}/filaflow-config
+      FILAFLOW_CONFIG_DIR: /tmp/filaflow-config
       FILAFLOW_BOOTSTRAP_ADMIN_EMAIL: admin@test.local
       FILAFLOW_BOOTSTRAP_ADMIN_PASSWORD: test-password-123
     steps:
