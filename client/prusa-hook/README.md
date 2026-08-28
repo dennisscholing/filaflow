@@ -1,61 +1,61 @@
-# PrusaSlicer verbinden met FilaFlow
+# Connect PrusaSlicer to FilaFlow
 
-De hook kopieert iedere geslicete `.gcode` of `.bgcode` eerst naar een lokale outbox en start daarna een losse uploader. De hook wijzigt de G-code niet en eindigt altijd met exitcode `0`. Een onbereikbare FilaFlow-server kan de gewone upload naar de printer daarom niet tegenhouden.
+The hook first copies each sliced `.gcode` or `.bgcode` file to a local outbox and then starts a separate uploader. It does not modify G-code and always exits with code `0`. An unavailable NAS or FilaFlow server therefore cannot stop the normal printer upload.
 
-## Vereisten
+## Requirements
 
-- Python 3 op de computer waarop PrusaSlicer draait;
-- een printer in FilaFlow;
-- een administratoraccount om een printergebonden API-token te maken;
-- het bestand `filaflow_hook.py` op een blijvende lokale locatie, bijvoorbeeld `C:\FilaFlow\filaflow_hook.py`.
+- Python 3 on the PrusaSlicer computer.
+- A printer configured in FilaFlow.
+- A printer-bound API token created by an administrator.
+- `filaflow_hook.py` in a permanent location such as `C:\FilaFlow\filaflow_hook.py`.
 
-## 1. Token en configuratie maken
+## 1. Configure the token
 
-1. Open FilaFlow en ga naar **Settings → PrusaSlicer API token**.
-2. Vul een herkenbare naam in en selecteer de juiste printer.
-3. Klik **Generate token**.
-4. Kopieer de getoonde configuratieopdracht; het token wordt later niet opnieuw getoond.
-5. Open PowerShell in de map van `filaflow_hook.py` en voer de opdracht uit, bijvoorbeeld:
+1. In FilaFlow, open **Settings → PrusaSlicer API token**.
+2. Enter a recognizable name and select the printer.
+3. Click **Generate token**.
+4. Copy the generated configuration command. The raw token is shown only once.
+5. Run the command in PowerShell, for example:
 
    ```powershell
-   python filaflow_hook.py --configure "http://NAS-IP:9000" "PRINTER_UUID" "ff_API_TOKEN"
+   python C:\FilaFlow\filaflow_hook.py --configure "http://YOUR-NAS-IP:9000" "PRINTER_UUID" "ff_API_TOKEN"
    ```
 
-De configuratie staat daarna in `%USERPROFILE%\.filaflow\config.json`. Bescherm dit bestand: het bevat het API-token.
+The configuration is stored in `%USERPROFILE%\.filaflow\config.json`. Protect this file because it contains the API token.
 
-## 2. Post-processing script instellen
+## 2. Add the post-processing script
 
-Open in PrusaSlicer **Print Settings → Output options → Post-processing scripts**. Voeg één regel toe. Gebruik op Windows bij voorkeur zowel het absolute Pythonpad als het absolute scriptpad:
+Open **Print Settings → Output options → Post-processing scripts** in PrusaSlicer. On Windows, using absolute paths is the most reliable option:
 
 ```text
-"C:\Users\JOUW_NAAM\AppData\Local\Programs\Python\Python312\python.exe" "C:\FilaFlow\filaflow_hook.py"
+"C:\Users\YOUR_NAME\AppData\Local\Programs\Python\Python312\python.exe" "C:\FilaFlow\filaflow_hook.py"
 ```
 
-Als `python` betrouwbaar op `PATH` staat, volstaat:
+If `python` works from PowerShell, this shorter command is sufficient:
 
 ```text
 python "C:\FilaFlow\filaflow_hook.py"
 ```
 
-Voeg zelf geen G-codepad toe. PrusaSlicer plaatst het absolute tijdelijke G-codepad automatisch als laatste argument. Sla het Print Settings-profiel daarna op.
+Do not add a G-code path. PrusaSlicer automatically appends the temporary file path as the final argument. Save the Print Settings profile.
 
-Zie ook Prusa's officiële uitleg over [post-processing scripts](https://help.prusa3d.com/article/post-processing-scripts_283913?product=prusaslicer).
+Prusa also documents [post-processing scripts](https://help.prusa3d.com/article/post-processing-scripts_283913?product=prusaslicer).
 
-## 3. Verbinding testen
+## 3. Test and retry
 
-1. Slice een klein testmodel.
-2. Verstuur of exporteer de G-code zoals normaal.
-3. Controleer in FilaFlow onder **Print inbox** of de job verschijnt.
-4. Controleer bij problemen `%USERPROFILE%\.filaflow\filaflow-hook.log`.
+1. Slice a small model.
+2. Export or send it as usual.
+3. Check **Print inbox** in FilaFlow.
+4. If nothing appears, inspect `%USERPROFILE%\.filaflow\filaflow-hook.log`.
 
-Mislukte uploads blijven met hun manifest in `%USERPROFILE%\.filaflow\outbox`. Opnieuw verzenden kan zonder opnieuw te slicen:
+Failed uploads remain in `%USERPROFILE%\.filaflow\outbox`. Retry them without slicing again:
 
 ```powershell
 python C:\FilaFlow\filaflow_hook.py --retry
 ```
 
-Een succesvolle retry verwijdert alleen het betreffende outboxbestand en manifest. Bij een blijvende fout blijven ze staan.
+A successful retry removes only that upload and its manifest. Failed items remain in the outbox.
 
-## Andere computer of printer
+## Multiple computers or printers
 
-Voer `--configure` opnieuw uit op iedere PrusaSlicer-computer. Gebruik per printer of werkplek een afzonderlijk token. De huidige clientconfiguratie wijst per Windows-/Linux-gebruiker naar één printer; gebruik voor verschillende printers aparte werkplekken of een afzonderlijke gebruikers-/configuratieomgeving.
+Run `--configure` on every PrusaSlicer computer and use a separate token for each printer or workstation. The current client configuration points one operating-system user to one printer; use separate workstations or user/configuration environments when one computer must maintain independent mappings.

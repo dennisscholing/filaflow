@@ -2,7 +2,8 @@ name: filaflow
 
 services:
   app:
-    image: ${FILAFLOW_IMAGE}
+    image: ghcr.io/dennisscholing/filaflow
+    pull_policy: always
     container_name: filaflow-app
     restart: unless-stopped
     depends_on:
@@ -13,7 +14,7 @@ services:
       FILAFLOW_SECRET_KEY: ${FILAFLOW_SECRET_KEY}
       FILAFLOW_BOOTSTRAP_ADMIN_EMAIL: ${FILAFLOW_ADMIN_EMAIL}
       FILAFLOW_BOOTSTRAP_ADMIN_PASSWORD: ${FILAFLOW_ADMIN_PASSWORD}
-      FILAFLOW_PUBLIC_URL: ${FILAFLOW_PUBLIC_URL:-http://localhost:9000}
+      FILAFLOW_PUBLIC_URL: ${FILAFLOW_PUBLIC_URL:-}
       FILAFLOW_COOKIE_SECURE: ${FILAFLOW_COOKIE_SECURE:-false}
       FILAFLOW_FORWARDED_ALLOW_IPS: ${FILAFLOW_FORWARDED_ALLOW_IPS:-127.0.0.1}
     ports:

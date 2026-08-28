@@ -1,26 +1,22 @@
-# FilaFlow installeren op Synology
+# Install FilaFlow on Synology
 
-Deze installatie gebruikt Synology DSM 7.2 met **Container Manager**. De NAS bouwt FilaFlow niet zelf; `FILAFLOW_IMAGE` moet verwijzen naar een vooraf gepubliceerde `linux/amd64`/`linux/arm64` image.
+This guide targets DSM 7.2 with **Container Manager**. The NAS downloads a prebuilt image for `linux/amd64` or `linux/arm64`; it does not compile FilaFlow.
 
-## 0. Eerst de containerimage publiceren
+## 0. Confirm the GitHub package is public
 
-De meegeleverde workflow `.github/workflows/container.yml` bouwt beide architecturen en publiceert naar GitHub Container Registry. De standaardwaarde `ghcr.io/filaflow-app/filaflow:latest` is een voorbeeld en werkt pas als daar daadwerkelijk een publieke image staat.
+The GitHub Action named **Multi-arch container** must be green. Then open your GitHub profile → **Packages** → **filaflow** → **Package settings** and confirm that package visibility is **Public**. Synology cannot download a private GHCR image without registry credentials.
 
-1. Plaats de broncode in een GitHub-repository.
-2. Push naar de standaardbranch of maak een tag, bijvoorbeeld `v0.1.4`.
-3. Controleer in GitHub onder **Actions** of `Multi-arch container` geslaagd is.
-4. Maak het GHCR-package publiek, zodat Synology zonder registry-wachtwoord kan downloaden.
-5. Gebruik bij voorkeur een vaste versie in `.env`:
+The Compose file already uses:
 
-   ```dotenv
-   FILAFLOW_IMAGE=ghcr.io/JOUW-GITHUB-NAAM/filaflow:v0.1.4
-   ```
+```text
+ghcr.io/dennisscholing/filaflow:latest
+```
 
-Gebruik `latest` alleen voor testen; een vaste tag maakt terugrollen voorspelbaar.
+There is no image version to maintain in `.env` or the Synology project.
 
-## 1. Mappen maken
+## 1. Create the folders
 
-Maak met File Station deze structuur:
+Create this structure in File Station:
 
 ```text
 /volume1/docker/filaflow/
@@ -34,11 +30,13 @@ Maak met File Station deze structuur:
         └── backup.sh
 ```
 
-Kopieer `docker-compose.yml`, `deploy/backup.sh` en een ingevulde kopie van `.env.example` naar de aangegeven projectmap. Bestanden die met een punt beginnen zijn mogelijk verborgen in File Station; upload `.env` rechtstreeks naar de map.
+Upload `docker-compose.yml`, `deploy/backup.sh`, and `.env.example` from the repository. Rename `.env.example` to `.env`. Files beginning with a dot may be hidden in File Station.
 
-## 2. Maprechten instellen
+If your storage volume is not `volume1`, change `FILAFLOW_DATA_ROOT` in `.env` and use the same volume name in the permission commands below.
 
-Open **Control Panel → Task Scheduler → Create → Scheduled Task → User-defined script**. Kies gebruiker `root`, voer het onderstaande script één keer uit en verwijder of deactiveer de taak daarna:
+## 2. Set folder permissions
+
+Open **Control Panel → Task Scheduler → Create → Scheduled Task → User-defined script**. Select user `root`, run this script once, and disable or remove the task afterward:
 
 ```sh
 chown -R 70:70 /volume1/docker/filaflow/postgres /volume1/docker/filaflow/backups
@@ -47,92 +45,120 @@ chmod 750 /volume1/docker/filaflow/postgres /volume1/docker/filaflow/backups /vo
 chmod 755 /volume1/docker/filaflow/project/deploy/backup.sh
 ```
 
-Gebruik geen `chmod 777`. Als je opslagvolume niet `volume1` heet, pas zowel deze paden als `FILAFLOW_DATA_ROOT` aan.
+Do not use `chmod 777`.
 
-## 3. `.env` invullen
+## 3. Edit `.env`
 
-Minimale configuratie:
+The required configuration is intentionally small:
 
 ```dotenv
-FILAFLOW_IMAGE=ghcr.io/JOUW-GITHUB-NAAM/filaflow:v0.1.4
 FILAFLOW_DATA_ROOT=/volume1/docker/filaflow
 FILAFLOW_PORT=9000
-FILAFLOW_PUBLIC_URL=http://192.168.1.10:9000
 FILAFLOW_COOKIE_SECURE=false
 FILAFLOW_FORWARDED_ALLOW_IPS=127.0.0.1
 
 POSTGRES_DB=filaflow
 POSTGRES_USER=filaflow
-POSTGRES_PASSWORD=EEN-LANG-UNIEK-DATABASEWACHTWOORD
-FILAFLOW_SECRET_KEY=MINSTENS-64-WILLEKEURIGE-TEKENS
-FILAFLOW_ADMIN_EMAIL=jouw-adres@example.nl
-FILAFLOW_ADMIN_PASSWORD=EEN-LANG-UNIEK-BEHEERDERSWACHTWOORD
+POSTGRES_PASSWORD=CHANGE_TO_A_LONG_UNIQUE_DATABASE_PASSWORD
+FILAFLOW_SECRET_KEY=CHANGE_TO_AT_LEAST_64_RANDOM_CHARACTERS
+FILAFLOW_ADMIN_EMAIL=admin@example.local
+FILAFLOW_ADMIN_PASSWORD=CHANGE_TO_A_LONG_UNIQUE_ADMIN_PASSWORD
 
 BACKUP_DAILY_KEEP=7
 BACKUP_WEEKLY_KEEP=4
 BACKUP_HOUR=2
 ```
 
-`FILAFLOW_ADMIN_EMAIL` en `FILAFLOW_ADMIN_PASSWORD` worden alleen gebruikt wanneer de database nog geen gebruiker bevat. Latere wijzigingen in `.env` wijzigen het bestaande account niet.
+Replace the three password/secret placeholders. The bootstrap email and password are only used when no user exists yet; later `.env` changes do not reset an existing account.
 
-## 4. Project aanmaken in Container Manager
+No NAS IP is required. Open the app using the same IP address or hostname you already use for DSM, followed by port `9000`. FilaFlow also uses the incoming browser address for QR-label links.
 
-1. Installeer en open **Container Manager** vanuit Package Center.
-2. Ga naar **Project → Create**.
-3. Gebruik projectnaam `filaflow`.
-4. Selecteer `/volume1/docker/filaflow/project` als pad.
-5. Kies het aanwezige `docker-compose.yml` als bron.
-6. Controleer de YAML-validatie en laat het project direct starten.
-7. Wacht totdat `filaflow-db` healthy is en `filaflow-app` draait.
+## 4. Create the Container Manager project
 
-Open vervolgens `http://IP-VAN-DE-NAS:9000` en meld aan met de beheerder uit `.env`. Ga naar **Settings → Users → Add user** om gewone operators of extra administrators aan te maken.
+1. Install and open **Container Manager** from Package Center.
+2. Open **Project → Create**.
+3. Enter project name `filaflow`.
+4. Select `/volume1/docker/filaflow/project` as the path.
+5. Use the existing `docker-compose.yml`.
+6. Confirm validation and start the project.
+7. Wait until `filaflow-db` is healthy and `filaflow-app` is running.
 
-## 5. Controleren na installatie
+Open `http://YOUR-NAS-IP:9000` and sign in with the bootstrap administrator from `.env`. Additional users can be created under **Settings → Users**.
 
-- **Overview** opent zonder foutmelding.
-- **Settings → OpenPrintTag → Synchronize** haalt de catalogus op.
-- In Container Manager is de databasepoort niet gepubliceerd; alleen poort `9000` is vanaf het netwerk bereikbaar.
-- In `/volume1/docker/filaflow/backups/daily` verschijnt na de ingestelde tijd een dump.
-- `http://IP-VAN-DE-NAS:9000/api/health` retourneert `{"status":"ok"}`.
+## 5. Verify the installation
 
-## 6. HTTPS via Synology Reverse Proxy (optioneel)
+- **Overview** opens successfully.
+- `http://YOUR-NAS-IP:9000/api/health` returns `{"status":"ok"}`.
+- Only port `9000` is published; PostgreSQL is internal to the Compose project.
+- **Settings → OpenPrintTag → Synchronize** downloads the catalog.
+- A dump appears in `/volume1/docker/filaflow/backups/daily` after the configured backup time.
 
-Ga naar **Control Panel → Login Portal → Advanced → Reverse Proxy → Create**:
+## 6. Optional HTTPS reverse proxy
 
-- Source: `HTTPS`, jouw hostnaam, poort `443`;
-- Destination: `HTTP`, `127.0.0.1`, poort `9000`;
-- koppel bij **Security → Certificate** een certificaat aan de hostnaam.
+Open **Control Panel → Login Portal → Advanced → Reverse Proxy → Create**:
 
-Wijzig daarna `.env`:
+- Source: `HTTPS`, your hostname, port `443`.
+- Destination: `HTTP`, `127.0.0.1`, port `9000`.
+- Assign the matching certificate under **Security → Certificate**.
+
+Then add or change these values in `.env`:
 
 ```dotenv
-FILAFLOW_PUBLIC_URL=https://filament.example.nl
+FILAFLOW_PUBLIC_URL=https://filament.example.com
 FILAFLOW_COOKIE_SECURE=true
 ```
 
-Bouw/start het project opnieuw vanuit Container Manager. Publiceer de applicatie niet onbeperkt op internet; beperk toegang bij voorkeur via VPN, firewall of een Synology access-control profile.
+The public URL is optional for normal LAN use. It is useful behind a reverse proxy so printed QR labels always contain the external HTTPS address.
 
-## 7. PrusaSlicer verbinden
+Rebuild and start the project after changing `.env`. Do not expose FilaFlow unrestricted to the internet; prefer a VPN, firewall rules, or a Synology access-control profile.
 
-1. Voeg eerst de printer toe in FilaFlow.
-2. Ga naar **Settings → PrusaSlicer API token**, geef het token een naam en selecteer de printer.
-3. Genereer het token en voer de getoonde `--configure`-opdracht uit op de PrusaSlicer-computer.
-4. Plaats `client/prusa-hook/filaflow_hook.py` op een vaste lokale locatie.
-5. Voeg in PrusaSlicer onder **Print Settings → Output options → Post-processing scripts** de Python- en scriptopdracht toe.
-6. Slice en verstuur een klein testmodel; controleer daarna **Print inbox**.
+## 7. Connect PrusaSlicer
 
-PrusaSlicer geeft het tijdelijke G-codepad zelf als laatste argument door. De hook kopieert dit bestand naar een lokale outbox en retourneert altijd succes, ook als FilaFlow of de NAS niet bereikbaar is. Zie [`client/prusa-hook/README.md`](../client/prusa-hook/README.md) voor Windows-voorbeelden, logging en opnieuw verzenden.
+1. Add the printer in FilaFlow.
+2. Open **Settings → PrusaSlicer API token**, name the token, and select the printer.
+3. Generate the token and run the displayed `--configure` command on the PrusaSlicer computer.
+4. Store `filaflow_hook.py` in a permanent local folder.
+5. Add its Python command under **Print Settings → Output options → Post-processing scripts**.
+6. Slice and export a small test model, then check **Print inbox**.
 
-## 8. Back-up, update en terugrollen
+PrusaSlicer appends the temporary G-code path automatically. The hook copies that file to a local outbox and always returns success, even when the NAS is offline. See the [PrusaSlicer hook guide](../client/prusa-hook/README.md) for Windows examples and retry instructions.
 
-Neem alleen `/volume1/docker/filaflow/backups` op in Hyper Backup. Kopieer de live PostgreSQL-datamap niet als vervanging voor `pg_dump`.
+## 8. Backups and restore
 
-Voor een update:
+Add `/volume1/docker/filaflow/backups` to Hyper Backup. Do not copy the live `postgres` directory as a replacement for a consistent `pg_dump`.
 
-1. maak een handmatige databaseback-up;
-2. noteer de huidige `FILAFLOW_IMAGE`;
-3. zet een nieuwe vaste image-tag in `.env`;
-4. kies in Container Manager bij het project **Action → Build** en daarna **Start**;
-5. controleer login, catalogus, rollen, printers en `/api/health`.
+Create a manual backup from the project directory:
 
-Voor terugrollen herstel je de dump van vóór de update en zet je de oude image-tag terug. Alleen de oude image terugzetten is niet voldoende wanneer de nieuwe versie een database-migratie heeft uitgevoerd.
+```sh
+docker compose exec backup pg_dump --format=custom --compress=9 --file=/backups/daily/filaflow-manual.dump
+```
+
+Restore a dump into an empty database:
+
+```sh
+docker compose stop app backup
+docker compose exec -T db dropdb -U filaflow --if-exists filaflow
+docker compose exec -T db createdb -U filaflow filaflow
+docker compose exec -T db pg_restore -U filaflow -d filaflow --clean --if-exists < /volume1/docker/filaflow/backups/daily/YOUR-DUMP.dump
+docker compose start app backup
+```
+
+Use the database/user values from `.env` if you changed them. Test restores periodically in a separate project.
+
+## 9. Updates and rollback
+
+FilaFlow follows the `latest` image. Container Manager can detect a newer image, but it does not silently replace a running container. That safeguard prevents an unattended database migration from surprising you.
+
+To update:
+
+1. Make a manual database backup.
+2. Open **Container Manager → Image**.
+3. Select the FilaFlow image and choose **Action → Update** or click **Update available**.
+4. Open **Project**, select `filaflow`, choose **Action → Build**, then **Start**.
+5. Check login, spools, printers, OpenPrintTag, and `/api/health`.
+
+No version, IP, `.env`, or YAML edit is required. The Compose `pull_policy` also requests the current image whenever the project is recreated.
+
+Fully unattended updating would require a privileged host task or a container with Docker-socket access. FilaFlow deliberately avoids that security risk.
+
+For rollback, restore the database dump made before the update and deploy a known older image tag temporarily. Reverting only the image may be unsafe after a database migration.

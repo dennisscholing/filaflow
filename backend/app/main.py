@@ -326,10 +326,11 @@ def empty_spool(spool_id: uuid.UUID, db: Session = Depends(get_db), user: User =
 
 
 @app.get("/api/spools/{spool_id}/label.svg")
-def spool_label(spool_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(current_user)):
+def spool_label(spool_id: uuid.UUID, request: Request, db: Session = Depends(get_db), user: User = Depends(current_user)):
     spool = db.get(Spool, spool_id)
     if not spool: raise HTTPException(404, "Spool not found")
-    target = f"{settings.public_url.rstrip('/')}/spools/{spool.id}"
+    base_url = settings.public_url or str(request.base_url)
+    target = f"{base_url.rstrip('/')}/spools/{spool.id}"
     return Response(render_spool_label(spool, target), media_type="image/svg+xml", headers={"Content-Disposition": f'inline; filename="{spool.code}.svg"'})
 
 
