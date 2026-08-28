@@ -9,10 +9,12 @@ FilaFlow never controls, pauses, approves, or blocks a print. The PrusaSlicer ho
 - Dark, responsive English interface.
 - Physical spools with UUIDv7, immutable `SPL` codes, weight and length, ledger history, weighing, QR labels, and archiving.
 - Multiple printers with `PRN` codes, single/dual/INDX T1–T8 presets, dynamic tools, and loadouts.
+- Automatic multi-printer routing from one PrusaSlicer installation, including physical-printer profile aliases and a safe default.
 - Print inbox with `NEW`, `MAPPED`, `NEEDS_REVIEW`, `BOOKED`, and `DISMISSED` states.
 - Regular G-code and binary `.bgcode` through the official libbgcode CLI.
 - OpenPrintTag catalog synchronization plus fully manual materials.
-- Admin/operator users, printer-bound API tokens, audit log, CSV/JSON export, and PostgreSQL backups.
+- Editable spool and printer metadata, offline color-name suggestions, and real 30-day usage in grams and metres.
+- Admin/operator users, printer-bound API tokens, audit log, CSV/JSON export, daily backups, and verified pre-upgrade backups.
 - Prebuilt `linux/amd64` and `linux/arm64` images for Synology Container Manager.
 
 ## Install
@@ -34,8 +36,10 @@ You do not need to enter an image version or NAS IP in `.env`. Open FilaFlow at 
 1. Add a printer in FilaFlow.
 2. Open **Settings → PrusaSlicer API token** and create a printer-bound token.
 3. Copy `client/prusa-hook/filaflow_hook.py` to the PrusaSlicer computer.
-4. Follow the generated configuration command.
+4. Run the generated command once for every printer used on that computer.
 5. Add the hook under **Print Settings → Output options → Post-processing scripts**.
+
+The hook line stays the same for every printer. It selects the FilaFlow printer from the active PrusaSlicer physical-printer or printer profile.
 
 See [PrusaSlicer hook setup](client/prusa-hook/README.md) for exact Windows examples and troubleshooting.
 
@@ -43,7 +47,7 @@ See [PrusaSlicer hook setup](client/prusa-hook/README.md) for exact Windows exam
 
 The Compose file follows `latest`, so no version needs to be edited. Synology Container Manager shows when an image update is available. Apply it under **Image → filaflow → Action → Update**, then rebuild and start the project. A running container cannot safely replace itself; fully unattended updates would require Docker-socket access, which FilaFlow deliberately does not use.
 
-The app runs database migrations before startup. Make a backup before updating.
+Before a schema update, FilaFlow takes a PostgreSQL custom-format dump, validates it with `pg_restore`, writes a SHA-256 checksum, and only then runs the migration. Startup stops safely if the backup mount is missing, the revision is unknown, or migration verification fails. A manual backup before maintenance remains recommended.
 
 ## Backups
 

@@ -4,7 +4,7 @@ set -eu
 daily_keep="${BACKUP_DAILY_KEEP:-7}"
 weekly_keep="${BACKUP_WEEKLY_KEEP:-4}"
 backup_hour="${BACKUP_HOUR:-2}"
-case "$daily_keep:$weekly_keep:$backup_hour" in *[!0-9:]*|::*|:*) echo "Ongeldige retentie-instelling" >&2; exit 1;; esac
+case "$daily_keep:$weekly_keep:$backup_hour" in *[!0-9:]*|::*|:*) echo "Invalid backup retention setting" >&2; exit 1;; esac
 mkdir -p /backups/daily /backups/weekly
 
 trim_backups() {

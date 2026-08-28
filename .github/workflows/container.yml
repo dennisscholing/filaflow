@@ -1,9 +1,10 @@
-name: Multi-arch container
+name: Test and publish container
 
 on:
   push:
     branches: [main]
     tags: ['v*']
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -11,7 +12,59 @@ permissions:
   packages: write
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: filaflow_test
+          POSTGRES_USER: filaflow
+          POSTGRES_PASSWORD: test-database-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U filaflow -d filaflow_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      PYTHONPATH: backend
+      FILAFLOW_DATABASE_URL: postgresql+psycopg://filaflow:test-database-password@127.0.0.1:5432/filaflow_test
+      FILAFLOW_CONFIG_DIR: ${{ runner.temp }}/filaflow-config
+      FILAFLOW_BOOTSTRAP_ADMIN_EMAIL: admin@test.local
+      FILAFLOW_BOOTSTRAP_ADMIN_PASSWORD: test-password-123
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build:spa
+      - run: python -m pip install -r backend/requirements.txt
+      - name: Test representative v0.1.6 upgrade
+        run: |
+          cd backend
+          python -m alembic upgrade 0002_indx_t1_t8
+          cd ..
+          python backend/tests/upgrade_fixture.py seed
+          cd backend
+          python -m alembic upgrade head
+          cd ..
+          python backend/tests/upgrade_fixture.py verify
+      - run: python -m pytest backend/tests client/prusa-hook/test_hook.py -q -p no:cacheprovider
+      - run: docker compose --env-file .env.example config --quiet
+
   build:
+    if: ${{ github.event_name != 'pull_request' && !(startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')) }}
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,8 +80,8 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository_owner }}/filaflow
           tags: |
+            type=raw,value=candidate,enable={{is_default_branch}}
             type=ref,event=tag
-            type=raw,value=latest,enable={{is_default_branch}}
             type=sha
       - uses: docker/build-push-action@v6
         with:
@@ -39,3 +92,27 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  promote:
+    if: ${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Promote the already-tested image digest
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/filaflow
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          short_sha="${GITHUB_SHA:0:7}"
+          source="${IMAGE}:sha-${short_sha}"
+          docker buildx imagetools inspect "$source"
+          docker buildx imagetools create --tag "${IMAGE}:${RELEASE_TAG}" --tag "${IMAGE}:latest" "$source"
+          source_digest="$(docker buildx imagetools inspect "$source" --format '{{.Manifest.Digest}}')"
+          latest_digest="$(docker buildx imagetools inspect "${IMAGE}:latest" --format '{{.Manifest.Digest}}')"
+          test "$source_digest" = "$latest_digest"

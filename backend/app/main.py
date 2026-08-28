@@ -11,14 +11,15 @@ import secrets
 import shutil
 import uuid
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from xml.sax.saxutils import escape
 
 import qrcode
 import qrcode.image.svg
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, Response, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import FileResponse
@@ -29,16 +30,17 @@ from sqlalchemy.orm import Session, selectinload
 from .audit import audit
 from .auth import admin_user, clear_session, current_user, hash_password, issue_api_token, set_session, token_hash, verify_password
 from .catalog import CatalogSyncError, catalog_metadata, sync_catalog
+from .colors import nearest_color
 from .config import settings
-from .database import Base, SessionLocal, engine, get_db
+from .database import SessionLocal, get_db
 from .gcode import parse_gcode
 from .ids import next_code
 from .models import ApiToken, AuditEvent, CatalogMaterial, CatalogSnapshot, InventoryEntry, JobUsage, PrintJob, Printer, PrinterTool, Spool, User, now_utc
-from .schemas import JobBookInput, JobMapInput, LoadoutInput, LoginInput, PrinterInput, SpoolInput, TokenInput, UserCreateInput, UserStatusInput, WeighInput
+from .schemas import JobBookInput, JobMapInput, JobPrinterInput, LoadoutInput, LoginInput, PrinterInput, PrinterUpdateInput, SpoolInput, SpoolUpdateInput, TokenInput, UserCreateInput, UserStatusInput, WeighInput
 from .units import grams_to_mg, length_mm_to_weight_mg, mg_to_grams, weight_mg_to_length_mm
 
 
-app = FastAPI(title="FilaFlow API", version="1.0.0", docs_url="/api/docs", redoc_url=None)
+app = FastAPI(title="FilaFlow API", version="0.2.0", docs_url="/api/docs", redoc_url=None)
 
 
 def spool_json(db: Session, spool: Spool) -> dict:
@@ -49,7 +51,7 @@ def spool_json(db: Session, spool: Spool) -> dict:
     loaded = db.scalar(select(PrinterTool).where(PrinterTool.loaded_spool_id == spool.id).options(selectinload(PrinterTool.printer)))
     return {
         "id": str(spool.id), "code": spool.code, "brand": spool.brand, "materialName": spool.material_name, "materialType": spool.material_type,
-        "colorName": spool.color_name, "colorHex": spool.color_hex, "location": spool.location, "lotNumber": spool.lot_number, "serialNumber": spool.serial_number, "diameterMm": float(spool.diameter_mm), "density": float(spool.density_g_cm3),
+        "colorName": spool.color_name, "colorHex": spool.color_hex, "location": spool.location, "lotNumber": spool.lot_number, "serialNumber": spool.serial_number, "diameterMm": float(spool.diameter_mm), "density": float(spool.density_g_cm3), "tareWeightG": mg_to_grams(spool.tare_weight_mg), "lowStockWeightG": mg_to_grams(spool.low_stock_weight_mg),
         "initialWeightG": mg_to_grams(spool.initial_weight_mg), "remainingWeightG": mg_to_grams(spool.remaining_weight_mg), "reservedWeightG": mg_to_grams(int(reserved_weight)),
         "availableWeightG": mg_to_grams(spool.remaining_weight_mg - int(reserved_weight)), "initialLengthM": float(spool.initial_length_mm / 1000),
         "remainingLengthM": float(spool.remaining_length_mm / 1000), "reservedLengthM": float(Decimal(reserved_length) / 1000),
@@ -58,18 +60,19 @@ def spool_json(db: Session, spool: Spool) -> dict:
         "loadedOn": {"printer": loaded.printer.name, "printerCode": loaded.printer.code, "tool": loaded.label} if loaded else None,
         "purchasePrice": spool.purchase_price_cents / 100 if spool.purchase_price_cents is not None else None, "currency": spool.currency,
         "catalogSnapshot": spool.catalog_snapshot,
+        "openPrintTag": {"brandUuid": str(spool.opt_brand_uuid) if spool.opt_brand_uuid else None, "materialUuid": str(spool.opt_material_uuid) if spool.opt_material_uuid else None, "packageUuid": str(spool.opt_package_uuid) if spool.opt_package_uuid else None, "containerUuid": str(spool.opt_container_uuid) if spool.opt_container_uuid else None},
     }
 
 
 def printer_json(printer: Printer) -> dict:
-    return {"id": str(printer.id), "code": printer.code, "name": printer.name, "manufacturer": printer.manufacturer, "model": printer.model, "slicerProfile": printer.slicer_profile, "notes": printer.notes, "archived": printer.archived,
+    return {"id": str(printer.id), "code": printer.code, "name": printer.name, "manufacturer": printer.manufacturer, "model": printer.model, "location": printer.location, "slicerProfile": printer.slicer_profile, "notes": printer.notes, "archived": printer.archived,
             "tools": [{"id": str(tool.id), "index": tool.slicer_index, "label": tool.label, "nozzleDiameterMm": float(tool.nozzle_diameter_mm) if tool.nozzle_diameter_mm else None,
                        "loadedSpool": {"id": str(tool.loaded_spool.id), "code": tool.loaded_spool.code, "brand": tool.loaded_spool.brand, "material": tool.loaded_spool.material_name, "colorHex": tool.loaded_spool.color_hex, "remainingWeightG": mg_to_grams(tool.loaded_spool.remaining_weight_mg)} if tool.loaded_spool else None}
                       for tool in printer.tools if not tool.archived]}
 
 
 def job_json(job: PrintJob) -> dict:
-    return {"id": str(job.id), "code": job.code, "filename": job.filename, "displayName": job.display_name, "status": job.status, "estimatedSeconds": job.estimated_seconds, "createdAt": job.created_at.isoformat(), "warnings": job.parser_warnings, "printer": job.printer_snapshot,
+    return {"id": str(job.id), "code": job.code, "filename": job.filename, "displayName": job.display_name, "status": job.status, "estimatedSeconds": job.estimated_seconds, "createdAt": job.created_at.isoformat(), "warnings": job.parser_warnings, "printer": job.printer_snapshot, "slicerProfile": job.printer_snapshot.get("slicerSourceProfile", ""), "routingMode": job.printer_snapshot.get("routingMode", "profile"),
             "usages": [{"id": str(usage.id), "toolIndex": usage.tool_index, "toolLabel": usage.tool_label, "materialType": usage.material_type, "colorHex": usage.color_hex, "estimatedLengthM": float(usage.estimated_length_mm / 1000), "estimatedWeightG": mg_to_grams(usage.estimated_weight_mg), "actualLengthM": float(usage.actual_length_mm / 1000) if usage.actual_length_mm is not None else None, "actualWeightG": mg_to_grams(usage.actual_weight_mg) if usage.actual_weight_mg is not None else None, "suggestedSpoolId": str(usage.suggested_spool_id) if usage.suggested_spool_id else None, "mappedSpoolId": str(usage.mapped_spool_id) if usage.mapped_spool_id else None} for usage in job.usages]}
 
 
@@ -81,6 +84,12 @@ def next_job_code(db: Session) -> str:
         try: highest = max(highest, int(code.rsplit("-", 1)[1]))
         except (ValueError, IndexError): pass
     return f"{prefix}{highest + 1:04d}"
+
+
+def printer_snapshot(printer: Printer, source_profile: str = "", physical_profile: str = "", routing_mode: str = "profile") -> dict:
+    return {"id": str(printer.id), "code": printer.code, "name": printer.name, "model": printer.model, "location": printer.location,
+            "slicerSourceProfile": source_profile, "slicerPhysicalProfile": physical_profile, "routingMode": routing_mode,
+            "tools": [{"id": str(tool.id), "index": tool.slicer_index, "label": tool.label} for tool in printer.tools if not tool.archived]}
 
 
 def render_spool_label(spool: Spool, target: str) -> bytes:
@@ -126,7 +135,6 @@ def user_json(user: User) -> dict:
 
 
 def bootstrap() -> None:
-    Base.metadata.create_all(engine)
     with SessionLocal() as db:
         if not db.scalar(select(User.id).limit(1)):
             db.add(User(email=settings.bootstrap_admin_email.lower(), display_name="Administrator", password_hash=hash_password(settings.bootstrap_admin_password), role="admin"))
@@ -256,10 +264,37 @@ def list_spools(q: str = "", archived: bool = False, db: Session = Depends(get_d
 def create_spool(data: SpoolInput, db: Session = Depends(get_db), user: User = Depends(current_user)):
     weight_mg = grams_to_mg(data.initial_weight_g)
     length_mm = data.initial_length_m * 1000 if data.initial_length_m is not None else weight_mg_to_length_mm(weight_mg, data.diameter_mm, data.density_g_cm3)
-    spool = Spool(code=next_code(db, Spool, "SPL"), brand=data.brand, material_name=data.material_name, material_type=data.material_type, color_name=data.color_name, color_hex=data.color_hex, location=data.location, lot_number=data.lot_number, serial_number=data.serial_number, diameter_mm=data.diameter_mm, density_g_cm3=data.density_g_cm3, tare_weight_mg=grams_to_mg(data.tare_weight_g), initial_weight_mg=weight_mg, remaining_weight_mg=weight_mg, initial_length_mm=length_mm, remaining_length_mm=length_mm, low_stock_weight_mg=grams_to_mg(data.low_stock_weight_g), purchase_price_cents=int(data.purchase_price * 100) if data.purchase_price is not None else None, currency=data.currency, opt_brand_uuid=uuid.UUID(data.opt_brand_uuid) if data.opt_brand_uuid else None, opt_material_uuid=uuid.UUID(data.opt_material_uuid) if data.opt_material_uuid else None, opt_package_uuid=uuid.UUID(data.opt_package_uuid) if data.opt_package_uuid else None, opt_container_uuid=uuid.UUID(data.opt_container_uuid) if data.opt_container_uuid else None, catalog_snapshot=data.catalog_snapshot)
+    color_name = data.color_name.strip() or nearest_color(data.color_hex)[0]
+    spool = Spool(code=next_code(db, Spool, "SPL"), brand=data.brand.strip(), material_name=data.material_name.strip(), material_type=data.material_type.strip(), color_name=color_name, color_hex=data.color_hex, location=data.location.strip(), lot_number=data.lot_number.strip(), serial_number=data.serial_number.strip(), diameter_mm=data.diameter_mm, density_g_cm3=data.density_g_cm3, tare_weight_mg=grams_to_mg(data.tare_weight_g), initial_weight_mg=weight_mg, remaining_weight_mg=weight_mg, initial_length_mm=length_mm, remaining_length_mm=length_mm, low_stock_weight_mg=grams_to_mg(data.low_stock_weight_g), purchase_price_cents=int(data.purchase_price * 100) if data.purchase_price is not None else None, currency=data.currency.upper(), opt_brand_uuid=uuid.UUID(data.opt_brand_uuid) if data.opt_brand_uuid else None, opt_material_uuid=uuid.UUID(data.opt_material_uuid) if data.opt_material_uuid else None, opt_package_uuid=uuid.UUID(data.opt_package_uuid) if data.opt_package_uuid else None, opt_container_uuid=uuid.UUID(data.opt_container_uuid) if data.opt_container_uuid else None, catalog_snapshot=data.catalog_snapshot)
     db.add(spool); db.flush()
     db.add(InventoryEntry(spool_id=spool.id, kind="INITIAL", weight_delta_mg=weight_mg, length_delta_mm=length_mm, diameter_mm=spool.diameter_mm, density_g_cm3=spool.density_g_cm3, note="New spool", actor_id=user.id))
     audit(db, user, "spool.created", "spool", spool.id, {"code": spool.code}); db.commit()
+    return spool_json(db, spool)
+
+
+@app.put("/api/spools/{spool_id}")
+def update_spool(spool_id: uuid.UUID, data: SpoolUpdateInput, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    spool = db.get(Spool, spool_id, with_for_update=True)
+    if not spool: raise HTTPException(404, "Spool not found")
+    old = {"brand": spool.brand, "materialName": spool.material_name, "materialType": spool.material_type, "colorName": spool.color_name, "colorHex": spool.color_hex, "location": spool.location, "lotNumber": spool.lot_number, "serialNumber": spool.serial_number, "diameterMm": str(spool.diameter_mm), "density": str(spool.density_g_cm3), "tareWeightMg": spool.tare_weight_mg, "lowStockWeightMg": spool.low_stock_weight_mg, "purchasePriceCents": spool.purchase_price_cents, "currency": spool.currency}
+    conversion_changed = spool.diameter_mm != data.diameter_mm or spool.density_g_cm3 != data.density_g_cm3
+    if conversion_changed:
+        new_initial_length = weight_mg_to_length_mm(spool.initial_weight_mg, data.diameter_mm, data.density_g_cm3)
+        new_remaining_length = weight_mg_to_length_mm(spool.remaining_weight_mg, data.diameter_mm, data.density_g_cm3)
+        delta_length = new_remaining_length - spool.remaining_length_mm
+        spool.initial_length_mm, spool.remaining_length_mm = new_initial_length, new_remaining_length
+        if delta_length:
+            db.add(InventoryEntry(spool_id=spool.id, kind="METADATA_CORRECTION", weight_delta_mg=0, length_delta_mm=delta_length, diameter_mm=data.diameter_mm, density_g_cm3=data.density_g_cm3, note="Length recalculated after diameter or density correction", actor_id=user.id))
+    spool.brand, spool.material_name, spool.material_type = data.brand.strip(), data.material_name.strip(), data.material_type.strip()
+    spool.color_name, spool.color_hex = data.color_name.strip() or nearest_color(data.color_hex)[0], data.color_hex
+    spool.location, spool.lot_number, spool.serial_number = data.location.strip(), data.lot_number.strip(), data.serial_number.strip()
+    spool.diameter_mm, spool.density_g_cm3 = data.diameter_mm, data.density_g_cm3
+    spool.tare_weight_mg, spool.low_stock_weight_mg = grams_to_mg(data.tare_weight_g), grams_to_mg(data.low_stock_weight_g)
+    spool.purchase_price_cents = int(data.purchase_price * 100) if data.purchase_price is not None else None
+    spool.currency = data.currency
+    new = {"brand": spool.brand, "materialName": spool.material_name, "materialType": spool.material_type, "colorName": spool.color_name, "colorHex": spool.color_hex, "location": spool.location, "lotNumber": spool.lot_number, "serialNumber": spool.serial_number, "diameterMm": str(spool.diameter_mm), "density": str(spool.density_g_cm3), "tareWeightMg": spool.tare_weight_mg, "lowStockWeightMg": spool.low_stock_weight_mg, "purchasePriceCents": spool.purchase_price_cents, "currency": spool.currency}
+    changes = {key: {"old": old[key], "new": value} for key, value in new.items() if old[key] != value}
+    audit(db, user, "spool.updated", "spool", spool.id, {"changes": changes}); db.commit()
     return spool_json(db, spool)
 
 
@@ -345,11 +380,24 @@ def create_printer(data: PrinterInput, db: Session = Depends(get_db), user: User
     counts = {"single": 1, "dual": 2, "indx8": 8}
     count = data.tool_count or counts.get(data.preset, 1)
     start_index = 1 if data.preset == "indx8" else 0
-    printer = Printer(code=next_code(db, Printer, "PRN"), name=data.name, manufacturer=data.manufacturer, model=data.model, slicer_profile=data.slicer_profile, notes=data.notes)
+    printer = Printer(code=next_code(db, Printer, "PRN"), name=data.name.strip(), manufacturer=data.manufacturer.strip(), model=data.model.strip(), location=data.location.strip(), slicer_profile=data.slicer_profile.strip(), notes=data.notes.strip())
     db.add(printer); db.flush()
     for index in range(start_index, start_index + count): db.add(PrinterTool(printer_id=printer.id, slicer_index=index, label=f"T{index}", nozzle_diameter_mm=Decimal("0.4")))
     audit(db, user, "printer.created", "printer", printer.id, {"tools": count}); db.commit()
     printer = db.scalar(select(Printer).where(Printer.id == printer.id).options(selectinload(Printer.tools).selectinload(PrinterTool.loaded_spool)))
+    return printer_json(printer)
+
+
+@app.put("/api/printers/{printer_id}")
+def update_printer(printer_id: uuid.UUID, data: PrinterUpdateInput, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    printer = db.scalar(select(Printer).where(Printer.id == printer_id).options(selectinload(Printer.tools).selectinload(PrinterTool.loaded_spool)))
+    if not printer: raise HTTPException(404, "Printer not found")
+    old = {"name": printer.name, "manufacturer": printer.manufacturer, "model": printer.model, "location": printer.location, "slicerProfile": printer.slicer_profile, "notes": printer.notes}
+    printer.name, printer.manufacturer, printer.model = data.name.strip(), data.manufacturer.strip(), data.model.strip()
+    printer.location, printer.slicer_profile, printer.notes = data.location.strip(), data.slicer_profile.strip(), data.notes.strip()
+    new = {"name": printer.name, "manufacturer": printer.manufacturer, "model": printer.model, "location": printer.location, "slicerProfile": printer.slicer_profile, "notes": printer.notes}
+    changes = {key: {"old": old[key], "new": value} for key, value in new.items() if old[key] != value}
+    audit(db, user, "printer.updated", "printer", printer.id, {"changes": changes}); db.commit()
     return printer_json(printer)
 
 
@@ -376,7 +424,7 @@ def list_jobs(status: str | None = None, db: Session = Depends(get_db), user: Us
 
 
 @app.post("/api/slicer/jobs", status_code=201)
-async def ingest_job(request: Request, printer_id: str = Form(...), file: UploadFile = File(...), idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"), db: Session = Depends(get_db), user: User = Depends(current_user)):
+async def ingest_job(request: Request, printer_id: str = Form(...), file: UploadFile = File(...), source_profile: str = Form(""), physical_profile: str = Form(""), routing_mode: str = Form("profile"), idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"), db: Session = Depends(get_db), user: User = Depends(current_user)):
     printer_uuid = uuid.UUID(printer_id)
     printer = db.scalar(select(Printer).where(Printer.id == printer_uuid).options(selectinload(Printer.tools).selectinload(PrinterTool.loaded_spool)))
     if not printer: raise HTTPException(404, "Printer not found")
@@ -401,8 +449,9 @@ async def ingest_job(request: Request, printer_id: str = Form(...), file: Upload
     finally:
         target.unlink(missing_ok=True)
     code = next_job_code(db)
-    snapshot = {"id": str(printer.id), "code": printer.code, "name": printer.name, "model": printer.model, "tools": [{"id": str(t.id), "index": t.slicer_index, "label": t.label} for t in printer.tools]}
+    snapshot = printer_snapshot(printer, source_profile[:255], physical_profile[:255], routing_mode[:30])
     warnings = parsed.warnings if parsed else warnings
+    if routing_mode == "default": warnings.append(f'Unknown PrusaSlicer profile "{source_profile or "(not provided)"}" was routed through the default printer')
     job = PrintJob(code=code, printer_id=printer.id, filename=file.filename or "print.gcode", display_name=Path(file.filename or "print").stem, idempotency_key=idem, file_sha256=digest.hexdigest(), status="NEEDS_REVIEW" if warnings or not parsed or not parsed.usages else "NEW", estimated_seconds=parsed.estimated_seconds if parsed else None, printer_snapshot=snapshot, parser_warnings=warnings, submitted_by_id=user.id)
     db.add(job); db.flush()
     tools = {t.slicer_index: t for t in printer.tools}
@@ -412,6 +461,39 @@ async def ingest_job(request: Request, printer_id: str = Form(...), file: Upload
             db.add(JobUsage(job_id=job.id, tool_id=tool.id if tool else None, tool_index=item.tool_index, tool_label=tool.label if tool else f"T{item.tool_index}", material_type=item.material_type, color_hex=item.color_hex, diameter_mm=item.diameter_mm, density_g_cm3=item.density_g_cm3, estimated_length_mm=item.length_mm, estimated_weight_mg=item.weight_mg, suggested_spool_id=tool.loaded_spool_id if tool else None))
     audit(db, user, "job.ingested", "print_job", job.id, {"filename": job.filename, "printer": printer.code}); db.commit()
     job = db.scalar(select(PrintJob).where(PrintJob.id == job.id).options(selectinload(PrintJob.usages)))
+    return job_json(job)
+
+
+@app.put("/api/jobs/{job_id}/printer")
+def change_job_printer(job_id: uuid.UUID, data: JobPrinterInput, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    job = db.scalar(select(PrintJob).where(PrintJob.id == job_id).options(selectinload(PrintJob.usages)).with_for_update())
+    if not job: raise HTTPException(404, "Print job not found")
+    if job.status in {"BOOKED", "DISMISSED"}: raise HTTPException(409, "A booked or dismissed job cannot change printer")
+    target_id = uuid.UUID(data.printer_id)
+    printer = db.scalar(select(Printer).where(Printer.id == target_id, Printer.archived.is_(False)).options(selectinload(Printer.tools).selectinload(PrinterTool.loaded_spool)))
+    if not printer: raise HTTPException(404, "Printer not found")
+    duplicate = db.scalar(select(PrintJob.id).where(PrintJob.id != job.id, PrintJob.printer_id == printer.id, PrintJob.idempotency_key == job.idempotency_key))
+    if duplicate: raise HTTPException(409, "This job already exists for the selected printer")
+    old_printer = {"id": str(job.printer_id), "code": job.printer_snapshot.get("code")}
+    source_profile = job.printer_snapshot.get("slicerSourceProfile", "")
+    physical_profile = job.printer_snapshot.get("slicerPhysicalProfile", "")
+    tools = {tool.slicer_index: tool for tool in printer.tools if not tool.archived}
+    warnings = [warning for warning in job.parser_warnings if not warning.startswith("Unknown PrusaSlicer profile") and not warning.startswith("No matching tool")]
+    unresolved = False
+    for usage in job.usages:
+        tool = tools.get(usage.tool_index)
+        usage.mapped_spool_id = None
+        usage.tool_id = tool.id if tool else None
+        usage.suggested_spool_id = tool.loaded_spool_id if tool else None
+        usage.tool_label = tool.label if tool else f"T{usage.tool_index}"
+        if not tool:
+            unresolved = True
+            warnings.append(f"No matching tool T{usage.tool_index} exists on {printer.code}")
+    job.printer_id = printer.id
+    job.printer_snapshot = printer_snapshot(printer, source_profile, physical_profile, "corrected")
+    job.parser_warnings = list(dict.fromkeys(warnings))
+    job.status = "NEEDS_REVIEW" if unresolved or warnings else "NEW"
+    audit(db, user, "job.printer_changed", "print_job", job.id, {"oldPrinter": old_printer, "newPrinter": {"id": str(printer.id), "code": printer.code}}); db.commit()
     return job_json(job)
 
 
@@ -455,6 +537,45 @@ def dismiss_job(job_id: uuid.UUID, db: Session = Depends(get_db), user: User = D
     job = db.get(PrintJob, job_id)
     if not job or job.status == "BOOKED": raise HTTPException(409, "A booked job cannot be dismissed")
     job.status = "DISMISSED"; audit(db, user, "job.dismissed", "print_job", job.id); db.commit(); return {"ok": True}
+
+
+@app.get("/api/colors/nearest")
+def nearest_color_name(hex: str = Query(...), user: User = Depends(current_user)):
+    try: name, matched = nearest_color(hex)
+    except ValueError as exc: raise HTTPException(422, str(exc)) from exc
+    return {"name": name, "matchedHex": matched}
+
+
+@app.get("/api/locations")
+def list_locations(db: Session = Depends(get_db), user: User = Depends(current_user)):
+    values = list(db.scalars(select(Spool.location).where(Spool.location != "")).all())
+    values.extend(db.scalars(select(Printer.location).where(Printer.location != "")).all())
+    unique: dict[str, str] = {}
+    for value in values:
+        cleaned = value.strip()
+        if cleaned: unique.setdefault(cleaned.casefold(), cleaned)
+    return sorted(unique.values(), key=str.casefold)
+
+
+@app.get("/api/analytics/usage")
+def usage_analytics(days: int = Query(30, ge=1, le=366), timezone_name: str = Query("UTC", alias="timezone"), db: Session = Depends(get_db), user: User = Depends(current_user)):
+    try: zone = ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError as exc: raise HTTPException(422, "Unknown IANA timezone") from exc
+    today = datetime.now(zone).date()
+    first_day = today - timedelta(days=days - 1)
+    start = datetime.combine(first_day, time.min, zone).astimezone(timezone.utc)
+    end = datetime.combine(today + timedelta(days=1), time.min, zone).astimezone(timezone.utc)
+    entries = db.scalars(select(InventoryEntry).where(InventoryEntry.kind == "PRINT", InventoryEntry.created_at >= start, InventoryEntry.created_at < end).order_by(InventoryEntry.created_at)).all()
+    daily = {first_day + timedelta(days=index): {"weightG": 0.0, "lengthM": 0.0} for index in range(days)}
+    for entry in entries:
+        created = entry.created_at
+        if created.tzinfo is None: created = created.replace(tzinfo=timezone.utc)
+        key = created.astimezone(zone).date()
+        if key in daily:
+            daily[key]["weightG"] += max(0, -entry.weight_delta_mg) / 1000
+            daily[key]["lengthM"] += float(max(Decimal("0"), -entry.length_delta_mm) / 1000)
+    points = [{"date": day.isoformat(), "weightG": round(values["weightG"], 3), "lengthM": round(values["lengthM"], 3)} for day, values in daily.items()]
+    return {"range": {"from": first_day.isoformat(), "to": today.isoformat(), "days": days, "timezone": timezone_name}, "totals": {"weightG": round(sum(point["weightG"] for point in points), 3), "lengthM": round(sum(point["lengthM"] for point in points), 3)}, "points": points}
 
 
 @app.get("/api/catalog/search")

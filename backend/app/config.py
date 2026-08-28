@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     catalog_url: str = "https://github.com/OpenPrintTag/openprinttag-database/archive/refs/heads/main.zip"
     catalog_sync_hour: int = 3
     cookie_secure: bool = False
+    migrations_enabled: bool = False
+    backup_dir: Path = Path("/backups")
+    preupgrade_backup_keep: int = 5
     model_config = SettingsConfigDict(env_prefix="FILAFLOW_", env_file=".env", extra="ignore")
 
     @property

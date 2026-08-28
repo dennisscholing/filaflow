@@ -29,21 +29,23 @@ If DSM reports a folder permission error, follow [Folder permissions](SYNOLOGY.m
 1. Add your printer in FilaFlow.
 2. Open **Settings → PrusaSlicer API token** and create a token for that printer.
 3. Copy `client/prusa-hook/filaflow_hook.py` to `C:\FilaFlow\filaflow_hook.py` on the PrusaSlicer computer.
-4. Run the configuration command shown by FilaFlow.
+4. Run the generated configuration command once for each printer you use in this PrusaSlicer installation.
 5. Add this under **Print Settings → Output options → Post-processing scripts**:
 
    ```text
    python "C:\FilaFlow\filaflow_hook.py"
    ```
 
-6. Slice and export a small model, then check **Print inbox** in FilaFlow.
+6. Make sure each printer's primary profile name in FilaFlow exactly matches PrusaSlicer, then slice and export a small model and check **Print inbox**.
 
-The hook never blocks the printer upload. Failed inventory uploads remain in the local outbox for retry.
+The one hook line works for all configured printers. Physical-printer profiles take priority over general printer profiles. The hook never blocks the printer upload; failed inventory uploads remain in the local outbox for retry.
 
 ## Updating later
 
-1. Make a manual backup.
-2. In Container Manager, open **Image**, select `filaflow`, and choose **Action → Update** when shown.
-3. Open **Project**, select `filaflow`, choose **Action → Build**, then **Start**.
+1. Before the first v0.2 update, replace `docker-compose.yml` and upload the current `deploy/backup.sh` from GitHub.
+2. Confirm that the backups folder is writable by group `70` as described in the full Synology guide.
+3. Make a manual backup.
+4. In Container Manager, open **Image**, select `filaflow`, and choose **Action → Update** when shown.
+5. Open **Project**, select `filaflow`, choose **Action → Build**, then **Start**.
 
-No image tag or YAML version needs to be changed.
+No image tag needs to be changed. During an update that changes the database, FilaFlow also creates and verifies a dump under `backups/pre-upgrade` before starting.

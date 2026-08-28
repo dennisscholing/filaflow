@@ -2,7 +2,7 @@
 
 /* oxlint-disable typescript/no-deprecated -- React form handlers use the framework's FormEvent type. */
 
-import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useId, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   Archive,
@@ -16,6 +16,8 @@ import {
   Layers3,
   LogOut,
   Plus,
+  Copy,
+  Pencil,
   Printer as PrinterIcon,
   RefreshCw,
   Scale,
@@ -27,6 +29,16 @@ import {
   Warehouse,
   X,
 } from 'lucide-react';
+import {
+  CartesianGrid,
+  Legend,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
@@ -65,6 +77,19 @@ type Spool = {
   location: string;
   lotNumber: string;
   serialNumber: string;
+  diameterMm: number;
+  density: number;
+  tareWeightG: number;
+  lowStockWeightG: number;
+  purchasePrice: number | null;
+  currency: string;
+  catalogSnapshot: Record<string, unknown>;
+  openPrintTag: {
+    brandUuid: string | null;
+    materialUuid: string | null;
+    packageUuid: string | null;
+    containerUuid: string | null;
+  };
   initialWeightG: number;
   remainingWeightG: number;
   reservedWeightG: number;
@@ -116,7 +141,9 @@ type Printer = {
   name: string;
   manufacturer: string;
   model: string;
+  location: string;
   slicerProfile: string;
+  notes: string;
   archived: boolean;
   tools: Tool[];
 };
@@ -142,8 +169,15 @@ type Job = {
   estimatedSeconds: number | null;
   createdAt: string;
   warnings: string[];
-  printer: { code: string; name: string };
+  slicerProfile: string;
+  routingMode: string;
+  printer: { id: string; code: string; name: string };
   usages: Usage[];
+};
+type UsageAnalytics = {
+  range: { from: string; to: string; days: number; timezone: string };
+  totals: { weightG: number; lengthM: number };
+  points: Array<{ date: string; weightG: number; lengthM: number }>;
 };
 type Dashboard = {
   summary: {
@@ -236,6 +270,7 @@ export function FilaFlowApp() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [spoolDialog, setSpoolDialog] = useState(false);
+  const [spoolTemplate, setSpoolTemplate] = useState<Spool | null>(null);
   const [printerDialog, setPrinterDialog] = useState(false);
   const [selectedJob, setSelectedJob] = useState<Job | null>(null);
 
@@ -330,7 +365,7 @@ export function FilaFlowApp() {
               {active === 'spools' && (
                 <Button
                   className="rounded-xl"
-                  onClick={() => setSpoolDialog(true)}
+                  onClick={() => { setSpoolTemplate(null); setSpoolDialog(true); }}
                 >
                   <Plus className="size-4" /> Add spool
                 </Button>
@@ -357,7 +392,8 @@ export function FilaFlowApp() {
               <SpoolsView
                 spools={spools}
                 onRefresh={refresh}
-                onAdd={() => setSpoolDialog(true)}
+                onAdd={() => { setSpoolTemplate(null); setSpoolDialog(true); }}
+                onDuplicate={(spool) => { setSpoolTemplate(spool); setSpoolDialog(true); }}
               />
             )}
             {active === 'printers' && (
@@ -397,8 +433,9 @@ export function FilaFlowApp() {
       </nav>
       <AddSpoolDialog
         open={spoolDialog}
-        onOpenChange={setSpoolDialog}
+        onOpenChange={(open) => { setSpoolDialog(open); if (!open) setSpoolTemplate(null); }}
         onCreated={refresh}
+        template={spoolTemplate}
       />
       <AddPrinterDialog
         open={printerDialog}
@@ -410,6 +447,7 @@ export function FilaFlowApp() {
           key={selectedJob.id}
           job={selectedJob}
           spools={spools}
+          printers={printers}
           open
           onOpenChange={(open) => !open && setSelectedJob(null)}
           onUpdated={async () => {
@@ -621,7 +659,7 @@ function Overview({
         printers={dashboard.printers}
         onAll={() => onNavigate('printers')}
       />
-      <TrendPanel />
+      <TrendPanel key={`${s.remainingWeightG}-${s.openJobs}`} />
     </div>
   );
 }
@@ -731,21 +769,41 @@ function PrinterPanel({
   );
 }
 function TrendPanel() {
-  const data = [28, 44, 22, 61, 48, 76, 53, 82, 65, 91, 58, 72];
+  const [usage, setUsage] = useState<UsageAnalytics | null>(null);
+  useEffect(() => {
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+    api<UsageAnalytics>(`/api/analytics/usage?days=30&timezone=${encodeURIComponent(timezone)}`)
+      .then(setUsage)
+      .catch(() => setUsage(null));
+  }, []);
+  const data = usage?.points.map((point) => ({
+    ...point,
+    label: new Date(`${point.date}T12:00:00`).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+  })) ?? [];
   return (
     <section className="rounded-2xl border bg-card p-5 shadow-sm">
       <div className="flex items-center justify-between">
-        <h2 className="font-bold">Usage this month</h2>
+        <div>
+          <h2 className="font-bold">Usage — last 30 days</h2>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {formatWeight(usage?.totals.weightG ?? 0)} · {formatLength(usage?.totals.lengthM ?? 0)} booked
+          </p>
+        </div>
         <Badge variant="secondary">30 days</Badge>
       </div>
-      <div className="mt-6 flex h-32 items-end gap-2">
-        {data.map((height, index) => (
-          <div
-            key={index}
-            className="flex-1 rounded-t-md bg-primary/20 transition hover:bg-primary"
-            style={{ height: `${height}%` }}
-          />
-        ))}
+      <div className="mt-5 h-64 w-full">
+        <ResponsiveContainer width="100%" height="100%">
+          <LineChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" opacity={0.2} />
+            <XAxis dataKey="label" minTickGap={28} tick={{ fontSize: 11 }} />
+            <YAxis yAxisId="grams" tick={{ fontSize: 11 }} width={46} unit=" g" />
+            <YAxis yAxisId="meters" orientation="right" tick={{ fontSize: 11 }} width={46} unit=" m" />
+            <Tooltip formatter={(value, name) => [`${Number(value).toLocaleString('en-US', { maximumFractionDigits: 2 })} ${name === 'Weight' ? 'g' : 'm'}`, name]} />
+            <Legend />
+            <Line yAxisId="grams" type="monotone" dataKey="weightG" name="Weight" stroke="var(--color-chart-1)" strokeWidth={2} dot={false} />
+            <Line yAxisId="meters" type="monotone" dataKey="lengthM" name="Length" stroke="var(--color-chart-2)" strokeWidth={2} dot={false} />
+          </LineChart>
+        </ResponsiveContainer>
       </div>
     </section>
   );
@@ -781,15 +839,18 @@ function SpoolsView({
   spools,
   onRefresh,
   onAdd,
+  onDuplicate,
 }: {
   spools: Spool[];
   onRefresh: () => Promise<void>;
   onAdd: () => void;
+  onDuplicate: (spool: Spool) => void;
 }) {
   const [query, setQuery] = useState('');
   const [filters, setFilters] = useState<SpoolFilters>(EMPTY_SPOOL_FILTERS);
   const [weigh, setWeigh] = useState<Spool | null>(null);
   const [emptySpool, setEmptySpool] = useState<Spool | null>(null);
+  const [editingSpool, setEditingSpool] = useState<Spool | null>(null);
   const [archivedSpools, setArchivedSpools] = useState<Spool[]>([]);
   const [showArchived, setShowArchived] = useState(false);
   const [loadingArchived, setLoadingArchived] = useState(false);
@@ -1028,9 +1089,13 @@ function SpoolsView({
             className="rounded-2xl border bg-card p-1 shadow-sm"
           >
             <SpoolCard spool={spool} />
-            <div
-              className={`grid gap-2 p-3 pt-0 ${spool.archived ? 'grid-cols-1' : 'grid-cols-3'}`}
-            >
+            <div className="flex flex-wrap gap-2 p-3 pt-0">
+              <Button variant="outline" size="sm" onClick={() => setEditingSpool(spool)}>
+                <Pencil className="size-4" /> Edit
+              </Button>
+              <Button variant="ghost" size="sm" onClick={() => onDuplicate(spool)}>
+                <Copy className="size-4" /> Duplicate
+              </Button>
               {!spool.archived && (
                 <Button
                   variant="outline"
@@ -1090,6 +1155,12 @@ function SpoolsView({
           await onRefresh();
         }}
       />
+      <EditSpoolDialog
+        spool={editingSpool}
+        open={!!editingSpool}
+        onOpenChange={(open) => !open && setEditingSpool(null)}
+        onUpdated={async () => { setEditingSpool(null); await onRefresh(); }}
+      />
     </div>
   );
 }
@@ -1102,6 +1173,7 @@ function PrintersView({
   spools: Spool[];
   onRefresh: () => Promise<void>;
 }) {
+  const [editingPrinter, setEditingPrinter] = useState<Printer | null>(null);
   async function load(printerId: string, toolId: string, spoolId: string) {
     await api(`/api/printers/${printerId}/tools/${toolId}/loadout`, {
       method: 'PUT',
@@ -1126,8 +1198,12 @@ function PrintersView({
                 {printer.manufacturer} {printer.model} ·{' '}
                 {printer.slicerProfile || 'No profile name'}
               </p>
+              {printer.location && <p className="mt-1 text-xs text-muted-foreground">{printer.location}</p>}
             </div>
-            <Badge>{printer.tools.length} tools</Badge>
+            <div className="flex items-center gap-2">
+              <Button variant="ghost" size="sm" onClick={() => setEditingPrinter(printer)}><Pencil className="size-4" /> Edit</Button>
+              <Badge>{printer.tools.length} tools</Badge>
+            </div>
           </div>
           <div className="space-y-2 p-4">
             {printer.tools.map((tool) => (
@@ -1165,6 +1241,7 @@ function PrintersView({
       {!printers.length && (
         <Empty text="No printers configured." />
       )}
+      <EditPrinterDialog printer={editingPrinter} open={!!editingPrinter} onOpenChange={(open) => !open && setEditingPrinter(null)} onUpdated={async () => { setEditingPrinter(null); await onRefresh(); }} />
     </div>
   );
 }
@@ -1312,7 +1389,7 @@ function SettingsView({
   }
   const configureCommand =
     token && tokenPrinterId
-      ? `python filaflow_hook.py --configure "${typeof window === 'undefined' ? '' : window.location.origin}" "${tokenPrinterId}" "${token}"`
+      ? `python filaflow_hook.py --add-printer "${typeof window === 'undefined' ? '' : window.location.origin}" "${tokenPrinterId}" "${token}" "${printers.find((printer) => printer.id === tokenPrinterId)?.slicerProfile ?? ''}"`
       : '';
   return (
     <div className="grid gap-5 lg:grid-cols-2">
@@ -1432,6 +1509,7 @@ function SettingsView({
                 <code className="mt-2 block break-all text-xs">
                   {configureCommand}
                 </code>
+                <p className="mt-3 text-xs text-muted-foreground">Run one generated command for every printer. The first configured printer becomes the default.</p>
               </div>
             )}
           </section>
@@ -1555,12 +1633,41 @@ function Field({
   );
 }
 
-function ColorField({ defaultValue }: { defaultValue: string }) {
-  const [value, setValue] = useState(defaultValue);
+function LocationField({ defaultValue = '' }: { defaultValue?: string }) {
+  const listId = useId();
+  const [locations, setLocations] = useState<string[]>([]);
+  useEffect(() => { api<string[]>('/api/locations').then(setLocations).catch(() => setLocations([])); }, []);
   return (
     <div className="space-y-2">
-      <Label htmlFor="colorHex">Color (HEX)</Label>
-      <div className="flex gap-2">
+      <Label htmlFor={`${listId}-location`}>Location</Label>
+      <Input id={`${listId}-location`} name="location" list={listId} defaultValue={defaultValue} />
+      <datalist id={listId}>{locations.map((location) => <option aria-label={location} key={location} value={location} />)}</datalist>
+    </div>
+  );
+}
+
+function ColorInputs({ defaultName = '', defaultHex = '#808080' }: { defaultName?: string; defaultHex?: string }) {
+  const [value, setValue] = useState(defaultHex);
+  const [name, setName] = useState(defaultName);
+  const [automatic, setAutomatic] = useState(!defaultName);
+  useEffect(() => {
+    if (!automatic || !/^#[0-9A-Fa-f]{6}$/.test(value)) return;
+    const timer = setTimeout(() => {
+      api<{ name: string }>(`/api/colors/nearest?hex=${encodeURIComponent(value)}`)
+        .then((result) => setName(result.name))
+        .catch(() => undefined);
+    }, 180);
+    return () => clearTimeout(timer);
+  }, [automatic, value]);
+  return (
+    <>
+      <div className="space-y-2">
+        <Label htmlFor="colorName">Color name</Label>
+        <Input id="colorName" name="colorName" value={name} onChange={(event) => { setName(event.target.value); setAutomatic(!event.target.value); }} />
+      </div>
+      <div className="space-y-2">
+        <Label htmlFor="colorHex">Color (HEX)</Label>
+        <div className="flex gap-2">
         <Input
           aria-label="Color picker"
           type="color"
@@ -1577,8 +1684,9 @@ function ColorField({ defaultValue }: { defaultValue: string }) {
           placeholder="#808080"
           required
         />
+        </div>
       </div>
-    </div>
+    </>
   );
 }
 
@@ -1586,10 +1694,12 @@ function AddSpoolDialog({
   open,
   onOpenChange,
   onCreated,
+  template,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onCreated: () => Promise<void>;
+  template: Spool | null;
 }) {
   const [query, setQuery] = useState('');
   const [catalog, setCatalog] = useState<CatalogItem[]>([]);
@@ -1640,6 +1750,7 @@ function AddSpoolDialog({
       purchase_price: f.get('purchasePrice')
         ? Number(f.get('purchasePrice'))
         : null,
+      currency: typeof f.get('currency') === 'string' ? (f.get('currency') as string).toUpperCase() : 'EUR',
       ...(picked
         ? {
             opt_brand_uuid: picked.opt.brandUuid,
@@ -1648,7 +1759,15 @@ function AddSpoolDialog({
             opt_container_uuid: picked.opt.containerUuid,
             catalog_snapshot: picked.raw,
           }
-        : {}),
+        : template
+          ? {
+              opt_brand_uuid: template.openPrintTag.brandUuid,
+              opt_material_uuid: template.openPrintTag.materialUuid,
+              opt_package_uuid: template.openPrintTag.packageUuid,
+              opt_container_uuid: template.openPrintTag.containerUuid,
+              catalog_snapshot: template.catalogSnapshot,
+            }
+          : {}),
     };
     try {
       await api('/api/spools', {
@@ -1755,43 +1874,38 @@ function AddSpoolDialog({
           )}
         </div>
         <form
-          key={picked?.id ?? 'manual'}
+          key={picked?.id ?? template?.id ?? 'manual'}
           onSubmit={submit}
           className="grid gap-4 sm:grid-cols-2"
         >
           <Field
             label="Brand"
             name="brand"
-            defaultValue={picked?.brand ?? 'Generic'}
+            defaultValue={picked?.brand ?? template?.brand ?? 'Generic'}
             required
           />
           <Field
             label="Material name"
             name="materialName"
-            defaultValue={picked?.materialName ?? ''}
+            defaultValue={picked?.materialName ?? template?.materialName ?? ''}
             required
           />
           <Field
             label="Material type"
             name="materialType"
-            defaultValue={picked?.materialType ?? 'PLA'}
+            defaultValue={picked?.materialType ?? template?.materialType ?? 'PLA'}
             required
           />
-          <Field
-            label="Color name"
-            name="colorName"
-            defaultValue={picked?.colorName ?? ''}
-          />
-          <ColorField defaultValue={picked?.colorHex ?? '#808080'} />
-          <Field label="Storage location" name="location" />
-          <Field label="Spool serial number" name="serialNumber" />
-          <Field label="Lot number" name="lotNumber" />
+          <ColorInputs defaultName={picked?.colorName ?? template?.colorName ?? ''} defaultHex={picked?.colorHex ?? template?.colorHex ?? '#808080'} />
+          <LocationField defaultValue={template?.location ?? ''} />
+          <Field label="Spool serial number" name="serialNumber" defaultValue="" />
+          <Field label="Lot number" name="lotNumber" defaultValue={template?.lotNumber ?? ''} />
           <Field
             label="Diameter (mm)"
             name="diameterMm"
             type="number"
             step="0.001"
-            defaultValue={picked?.diameterMm ?? 1.75}
+            defaultValue={picked?.diameterMm ?? template?.diameterMm ?? 1.75}
             required
           />
           <Field
@@ -1799,7 +1913,7 @@ function AddSpoolDialog({
             name="density"
             type="number"
             step="0.0001"
-            defaultValue={picked?.density ?? 1.24}
+            defaultValue={picked?.density ?? template?.density ?? 1.24}
             required
           />
           <Field
@@ -1807,7 +1921,7 @@ function AddSpoolDialog({
             name="initialWeightG"
             type="number"
             step="0.1"
-            defaultValue={picked?.nominalWeightG ?? 1000}
+            defaultValue={picked?.nominalWeightG ?? template?.initialWeightG ?? 1000}
             required
           />
           <Field
@@ -1815,28 +1929,30 @@ function AddSpoolDialog({
             name="initialLengthM"
             type="number"
             step="0.001"
-            defaultValue={picked?.nominalLengthM ?? ''}
+            defaultValue={picked?.nominalLengthM ?? template?.initialLengthM ?? ''}
           />
           <Field
             label="Spool tare (g)"
             name="tareWeightG"
             type="number"
             step="0.1"
-            defaultValue={picked?.tareWeightG ?? 0}
+            defaultValue={picked?.tareWeightG ?? template?.tareWeightG ?? 0}
           />
           <Field
             label="Low-stock threshold (g)"
             name="lowStockWeightG"
             type="number"
             step="1"
-            defaultValue="100"
+            defaultValue={template?.lowStockWeightG ?? 100}
           />
           <Field
-            label="Purchase price (€)"
+            label="Purchase price"
             name="purchasePrice"
             type="number"
             step="0.01"
+            defaultValue={template?.purchasePrice ?? ''}
           />
+          <Field label="Currency" name="currency" maxLength={3} defaultValue={template?.currency ?? 'EUR'} required />
           {error && (
             <p className="sm:col-span-2 text-sm text-destructive">{error}</p>
           )}
@@ -1851,6 +1967,50 @@ function AddSpoolDialog({
             <Button type="submit">Save spool</Button>
           </DialogFooter>
         </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function EditSpoolDialog({ spool, open, onOpenChange, onUpdated }: { spool: Spool | null; open: boolean; onOpenChange: (open: boolean) => void; onUpdated: () => Promise<void> }) {
+  const [error, setError] = useState('');
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!spool) return;
+    const f = new FormData(event.currentTarget);
+    try {
+      await api(`/api/spools/${spool.id}`, { method: 'PUT', body: JSON.stringify({
+        brand: f.get('brand'), material_name: f.get('materialName'), material_type: f.get('materialType'),
+        color_name: f.get('colorName'), color_hex: f.get('colorHex'), location: f.get('location'),
+        lot_number: f.get('lotNumber'), serial_number: f.get('serialNumber'), diameter_mm: Number(f.get('diameterMm')),
+        density_g_cm3: Number(f.get('density')), tare_weight_g: Number(f.get('tareWeightG')),
+        low_stock_weight_g: Number(f.get('lowStockWeightG')), purchase_price: f.get('purchasePrice') ? Number(f.get('purchasePrice')) : null,
+        currency: typeof f.get('currency') === 'string' ? (f.get('currency') as string).toUpperCase() : 'EUR',
+      }) });
+      await onUpdated();
+    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Save failed'); }
+  }
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-2xl">
+        <DialogHeader><DialogTitle>Edit {spool?.code}</DialogTitle><DialogDescription className="sr-only">Edit spool metadata.</DialogDescription></DialogHeader>
+        {spool && <form key={spool.id} onSubmit={submit} className="grid gap-4 sm:grid-cols-2">
+          <Field label="Brand" name="brand" defaultValue={spool.brand} required />
+          <Field label="Material name" name="materialName" defaultValue={spool.materialName} required />
+          <Field label="Material type" name="materialType" defaultValue={spool.materialType} required />
+          <ColorInputs defaultName={spool.colorName} defaultHex={spool.colorHex} />
+          <LocationField defaultValue={spool.location} />
+          <Field label="Spool serial number" name="serialNumber" defaultValue={spool.serialNumber} />
+          <Field label="Lot number" name="lotNumber" defaultValue={spool.lotNumber} />
+          <Field label="Diameter (mm)" name="diameterMm" type="number" step="0.001" defaultValue={spool.diameterMm} required />
+          <Field label="Density (g/cm³)" name="density" type="number" step="0.0001" defaultValue={spool.density} required />
+          <Field label="Spool tare (g)" name="tareWeightG" type="number" step="0.1" defaultValue={spool.tareWeightG} required />
+          <Field label="Low-stock threshold (g)" name="lowStockWeightG" type="number" step="1" defaultValue={spool.lowStockWeightG} required />
+          <Field label="Purchase price" name="purchasePrice" type="number" step="0.01" defaultValue={spool.purchasePrice ?? ''} />
+          <Field label="Currency" name="currency" maxLength={3} defaultValue={spool.currency || 'EUR'} required />
+          {error && <p className="sm:col-span-2 text-sm text-destructive">{error}</p>}
+          <DialogFooter className="sm:col-span-2"><Button variant="outline" type="button" onClick={() => onOpenChange(false)}>Cancel</Button><Button type="submit">Save changes</Button></DialogFooter>
+        </form>}
       </DialogContent>
     </Dialog>
   );
@@ -1876,7 +2036,9 @@ function AddPrinterDialog({
           name: f.get('name'),
           manufacturer: f.get('manufacturer'),
           model: f.get('model'),
+          location: f.get('location'),
           slicer_profile: f.get('slicerProfile'),
+          notes: f.get('notes'),
           preset: f.get('preset'),
         }),
       });
@@ -1901,7 +2063,9 @@ function AddPrinterDialog({
             <Field label="Manufacturer" name="manufacturer" defaultValue="Prusa" />
             <Field label="Model" name="model" />
           </div>
+          <LocationField />
           <Field label="PrusaSlicer profile name" name="slicerProfile" />
+          <Field label="Notes" name="notes" />
           <div className="space-y-2">
             <Label htmlFor="preset">Tool preset</Label>
             <select
@@ -1926,6 +2090,38 @@ function AddPrinterDialog({
             <Button type="submit">Save printer</Button>
           </DialogFooter>
         </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function EditPrinterDialog({ printer, open, onOpenChange, onUpdated }: { printer: Printer | null; open: boolean; onOpenChange: (open: boolean) => void; onUpdated: () => Promise<void> }) {
+  const [error, setError] = useState('');
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!printer) return;
+    const f = new FormData(event.currentTarget);
+    try {
+      await api(`/api/printers/${printer.id}`, { method: 'PUT', body: JSON.stringify({
+        name: f.get('name'), manufacturer: f.get('manufacturer'), model: f.get('model'), location: f.get('location'),
+        slicer_profile: f.get('slicerProfile'), notes: f.get('notes'),
+      }) });
+      await onUpdated();
+    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Save failed'); }
+  }
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader><DialogTitle>Edit {printer?.code}</DialogTitle><DialogDescription className="sr-only">Edit printer details.</DialogDescription></DialogHeader>
+        {printer && <form key={printer.id} onSubmit={submit} className="space-y-4">
+          <Field label="Name" name="name" defaultValue={printer.name} required />
+          <div className="grid grid-cols-2 gap-3"><Field label="Manufacturer" name="manufacturer" defaultValue={printer.manufacturer} /><Field label="Model" name="model" defaultValue={printer.model} /></div>
+          <LocationField defaultValue={printer.location} />
+          <Field label="PrusaSlicer profile name" name="slicerProfile" defaultValue={printer.slicerProfile} />
+          <div className="space-y-2"><Label htmlFor="printerNotes">Notes</Label><textarea id="printerNotes" name="notes" defaultValue={printer.notes} className="min-h-24 w-full rounded-lg border bg-background px-3 py-2 text-sm" /></div>
+          {error && <p className="text-sm text-destructive">{error}</p>}
+          <DialogFooter><Button variant="outline" type="button" onClick={() => onOpenChange(false)}>Cancel</Button><Button type="submit">Save changes</Button></DialogFooter>
+        </form>}
       </DialogContent>
     </Dialog>
   );
@@ -2053,12 +2249,14 @@ function EmptySpoolDialog({
 function JobDialog({
   job,
   spools,
+  printers,
   open,
   onOpenChange,
   onUpdated,
 }: {
   job: Job;
   spools: Spool[];
+  printers: Printer[];
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onUpdated: () => Promise<void>;
@@ -2080,6 +2278,13 @@ function JobDialog({
     ),
   );
   const [error, setError] = useState('');
+  const [jobPrinter, setJobPrinter] = useState(job.printer.id);
+  async function changePrinter() {
+    try {
+      await api(`/api/jobs/${job.id}/printer`, { method: 'PUT', body: JSON.stringify({ printer_id: jobPrinter }) });
+      await onUpdated();
+    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Printer change failed'); }
+  }
   async function saveMapping() {
     try {
       await api(`/api/jobs/${job.id}/mapping`, {
@@ -2136,6 +2341,17 @@ function JobDialog({
             {job.code} · {job.printer.code}
           </DialogDescription>
         </DialogHeader>
+        {(job.slicerProfile || job.routingMode === 'default') && (
+          <p className="text-xs text-muted-foreground">PrusaSlicer: {job.slicerProfile || 'Unknown profile'} · {job.routingMode}</p>
+        )}
+        {!['BOOKED', 'DISMISSED'].includes(job.status) && (
+          <div className="flex gap-2 rounded-xl border p-3">
+            <select className="h-10 min-w-0 flex-1 rounded-lg border bg-background px-3 text-sm" value={jobPrinter} onChange={(event) => setJobPrinter(event.target.value)}>
+              {printers.filter((printer) => !printer.archived).map((printer) => <option key={printer.id} value={printer.id}>{printer.code} · {printer.name}</option>)}
+            </select>
+            <Button variant="outline" onClick={changePrinter} disabled={jobPrinter === job.printer.id}>Change printer</Button>
+          </div>
+        )}
         {job.warnings.length > 0 && (
           <div className="rounded-xl bg-orange-500/10 p-3 text-sm text-orange-700">
             {job.warnings.join(' · ')}

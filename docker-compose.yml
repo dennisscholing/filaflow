@@ -2,7 +2,7 @@ name: filaflow
 
 services:
   app:
-    image: ghcr.io/dennisscholing/filaflow
+    image: ${FILAFLOW_IMAGE:-ghcr.io/dennisscholing/filaflow:latest}
     pull_policy: always
     container_name: filaflow-app
     restart: unless-stopped
@@ -21,10 +21,16 @@ services:
       FILAFLOW_PUBLIC_URL: ${FILAFLOW_PUBLIC_URL:-}
       FILAFLOW_COOKIE_SECURE: ${FILAFLOW_COOKIE_SECURE:-false}
       FILAFLOW_FORWARDED_ALLOW_IPS: ${FILAFLOW_FORWARDED_ALLOW_IPS:-127.0.0.1}
+      FILAFLOW_MIGRATIONS_ENABLED: "true"
+      FILAFLOW_BACKUP_DIR: /backups
+      FILAFLOW_PREUPGRADE_BACKUP_KEEP: ${BACKUP_PREUPGRADE_KEEP:-5}
     ports:
       - "${FILAFLOW_PORT:-9000}:9000"
     volumes:
       - ${FILAFLOW_DATA_ROOT:-/volume1/docker/filaflow}/config:/config
+      - ${FILAFLOW_DATA_ROOT:-/volume1/docker/filaflow}/backups:/backups
+    group_add:
+      - "70"
     networks:
       - frontend
       - database

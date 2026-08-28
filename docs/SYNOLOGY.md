@@ -41,11 +41,12 @@ Open **Control Panel → Task Scheduler → Create → Scheduled Task → User-d
 ```sh
 chown -R 70:70 /volume1/docker/filaflow/postgres /volume1/docker/filaflow/backups
 chown -R 10001:10001 /volume1/docker/filaflow/config
-chmod 750 /volume1/docker/filaflow/postgres /volume1/docker/filaflow/backups /volume1/docker/filaflow/config
+chmod 750 /volume1/docker/filaflow/postgres /volume1/docker/filaflow/config
+chmod 770 /volume1/docker/filaflow/backups
 chmod 755 /volume1/docker/filaflow/project/deploy/backup.sh
 ```
 
-Do not use `chmod 777`.
+The application joins group `70` only to create verified pre-upgrade dumps. Do not use `chmod 777`.
 
 ## 3. Edit `.env`
 
@@ -66,6 +67,7 @@ FILAFLOW_ADMIN_PASSWORD='CHANGE_TO_A_LONG_UNIQUE_ADMIN_PASSWORD'
 
 BACKUP_DAILY_KEEP=7
 BACKUP_WEEKLY_KEEP=4
+BACKUP_PREUPGRADE_KEEP=5
 BACKUP_HOUR=2
 ```
 
@@ -114,18 +116,21 @@ Rebuild and start the project after changing `.env`. Do not expose FilaFlow unre
 
 ## 7. Connect PrusaSlicer
 
-1. Add the printer in FilaFlow.
-2. Open **Settings → PrusaSlicer API token**, name the token, and select the printer.
-3. Generate the token and run the displayed `--configure` command on the PrusaSlicer computer.
-4. Store `filaflow_hook.py` in a permanent local folder.
-5. Add its Python command under **Print Settings → Output options → Post-processing scripts**.
-6. Slice and export a small test model, then check **Print inbox**.
+1. Add every physical printer in FilaFlow and enter its primary PrusaSlicer profile name exactly.
+2. Open **Settings → PrusaSlicer API token**, name the token, and select a printer.
+3. Generate the token and run the displayed `--add-printer` command on the PrusaSlicer computer.
+4. Repeat steps 2–3 once for every printer used by that PrusaSlicer installation.
+5. Store `filaflow_hook.py` in a permanent local folder.
+6. Add its Python command once under **Print Settings → Output options → Post-processing scripts**.
+7. Slice and export a small test model for each printer, then check **Print inbox**.
 
-PrusaSlicer appends the temporary G-code path automatically. The hook copies that file to a local outbox and always returns success, even when the NAS is offline. See the [PrusaSlicer hook guide](../client/prusa-hook/README.md) for Windows examples and retry instructions.
+PrusaSlicer appends the temporary G-code path automatically. The hook first checks the physical-printer profile, then the general printer profile, and finally the configured default. It copies the job to a local outbox and always returns success to PrusaSlicer, even when the NAS is offline. See the [PrusaSlicer hook guide](../client/prusa-hook/README.md) for aliases, Windows examples, and retry instructions.
 
 ## 8. Backups and restore
 
 Add `/volume1/docker/filaflow/backups` to Hyper Backup. Do not copy the live `postgres` directory as a replacement for a consistent `pg_dump`.
+
+Daily and weekly dumps are stored in `backups/daily` and `backups/weekly`. Before every database migration, the app creates a second custom-format dump in `backups/pre-upgrade`, verifies that `pg_restore` can read it, and records its SHA-256 checksum in the adjacent JSON file.
 
 Create a manual backup from the project directory:
 
@@ -151,14 +156,26 @@ FilaFlow follows the `latest` image. Container Manager can detect a newer image,
 
 To update:
 
-1. Make a manual database backup.
-2. Open **Container Manager → Image**.
-3. Select the FilaFlow image and choose **Action → Update** or click **Update available**.
-4. Open **Project**, select `filaflow`, choose **Action → Build**, then **Start**.
-5. Check login, spools, printers, OpenPrintTag, and `/api/health`.
+1. For the first v0.2 update, download the current `docker-compose.yml`, `.env.example`, and `deploy/backup.sh` from GitHub. Replace the Compose file and backup script in the project folder. Add any new non-secret options from `.env.example` to `.env`; do not overwrite your secrets.
+2. Re-run the permission commands from section 2. An old project without the writable backup mount is intentionally not allowed to migrate the database.
+3. Make a manual database backup.
+4. Open **Container Manager → Image**.
+5. Select the FilaFlow image and choose **Action → Update** or click **Update available**.
+6. Open **Project**, select `filaflow`, choose **Action → Build**, then **Start**.
+7. Wait a few minutes, then check login, spools, printers, OpenPrintTag, and `/api/health`.
 
-No version, IP, `.env`, or YAML edit is required. The Compose `pull_policy` also requests the current image whenever the project is recreated.
+Normal later updates do not require an image-tag or IP change. The Compose `pull_policy` requests the current image whenever the project is recreated. FilaFlow locks migration execution, rejects unknown database revisions, and starts the web server only after the database reaches the exact expected revision.
 
 Fully unattended updating would require a privileged host task or a container with Docker-socket access. FilaFlow deliberately avoids that security risk.
 
-For rollback, restore the database dump made before the update and deploy a known older image tag temporarily. Reverting only the image may be unsafe after a database migration.
+For a controlled image pin or rollback, add this line to `.env` and rebuild the project:
+
+```dotenv
+FILAFLOW_IMAGE=ghcr.io/dennisscholing/filaflow:v0.1.6
+```
+
+Remove the line later to follow `latest` again. If the failed update changed the schema, restore its verified `backups/pre-upgrade` dump before starting the older image. Reverting only the image may be unsafe after a database migration.
+
+### If a migration stops startup
+
+Read the `filaflow-app` log first. FilaFlow writes `/volume1/docker/filaflow/config/migration-failed.json` and blocks automatic retries so the same failing operation cannot loop. Keep this file while investigating. Restore the most recent verified pre-upgrade dump, confirm that the matching JSON checksum is present, and then either deploy the compatible previous image or remove the failure marker once before retrying the corrected update. Never delete the marker merely to force repeated attempts against the production database.

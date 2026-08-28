@@ -47,6 +47,7 @@ class Printer(Base):
     name: Mapped[str] = mapped_column(String(120))
     manufacturer: Mapped[str] = mapped_column(String(120), default="")
     model: Mapped[str] = mapped_column(String(120), default="")
+    location: Mapped[str] = mapped_column(String(120), default="")
     slicer_profile: Mapped[str] = mapped_column(String(255), default="")
     notes: Mapped[str] = mapped_column(Text, default="")
     archived: Mapped[bool] = mapped_column(Boolean, default=False)
