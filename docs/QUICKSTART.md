@@ -10,7 +10,7 @@ GitHub is ready when the **Multi-arch container** Action is green. Before instal
    - `.env.example`
    - the complete `deploy` folder
 3. Rename `.env.example` to `.env`.
-4. Edit `.env` and replace only the three password/secret placeholders.
+4. Edit `.env` and replace only the three password/secret placeholders. Keep the single quotes around their values.
 
 You do not need to enter an image version or NAS IP.
 

@@ -59,17 +59,17 @@ FILAFLOW_FORWARDED_ALLOW_IPS=127.0.0.1
 
 POSTGRES_DB=filaflow
 POSTGRES_USER=filaflow
-POSTGRES_PASSWORD=CHANGE_TO_A_LONG_UNIQUE_DATABASE_PASSWORD
-FILAFLOW_SECRET_KEY=CHANGE_TO_AT_LEAST_64_RANDOM_CHARACTERS
+POSTGRES_PASSWORD='CHANGE_TO_A_LONG_UNIQUE_DATABASE_PASSWORD'
+FILAFLOW_SECRET_KEY='CHANGE_TO_AT_LEAST_64_RANDOM_CHARACTERS'
 FILAFLOW_ADMIN_EMAIL=admin@example.local
-FILAFLOW_ADMIN_PASSWORD=CHANGE_TO_A_LONG_UNIQUE_ADMIN_PASSWORD
+FILAFLOW_ADMIN_PASSWORD='CHANGE_TO_A_LONG_UNIQUE_ADMIN_PASSWORD'
 
 BACKUP_DAILY_KEEP=7
 BACKUP_WEEKLY_KEEP=4
 BACKUP_HOUR=2
 ```
 
-Replace the three password/secret placeholders. The bootstrap email and password are only used when no user exists yet; later `.env` changes do not reset an existing account.
+Replace the three password/secret placeholders. Keep the single quotes so characters such as `$`, `%`, `#`, and `@` remain literal. The bootstrap email and password are only used when no user exists yet; later `.env` changes do not reset an existing account.
 
 No NAS IP is required. Open the app using the same IP address or hostname you already use for DSM, followed by port `9000`. FilaFlow also uses the incoming browser address for QR-label links.
 
