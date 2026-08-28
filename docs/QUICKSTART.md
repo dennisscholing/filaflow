@@ -11,8 +11,8 @@ git branch -M main
 git add .
 git commit -m "Initial FilaFlow version"
 gh repo create filaflow --public --source=. --remote=origin --push
-git tag v0.1.2
-git push origin v0.1.2
+git tag v0.1.3
+git push origin v0.1.3
 ```
 
 Open GitHub → **Actions** en wacht tot **Multi-arch container** groen is. Open daarna je GitHub-profiel → **Packages** → **filaflow** → **Package settings** en maak het package **Public**.
@@ -24,7 +24,7 @@ Open GitHub → **Actions** en wacht tot **Multi-arch container** groen is. Open
 3. Hernoem `.env.example` naar `.env` en vul je GitHub-naam, NAS-IP en wachtwoorden in. Gebruik:
 
    ```dotenv
-   FILAFLOW_IMAGE=ghcr.io/JOUW-GITHUB-NAAM/filaflow:v0.1.2
+   FILAFLOW_IMAGE=ghcr.io/JOUW-GITHUB-NAAM/filaflow:v0.1.3
    FILAFLOW_PORT=9000
    FILAFLOW_PUBLIC_URL=http://JOUW-NAS-IP:9000
    ```
