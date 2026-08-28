@@ -1,6 +1,6 @@
 FROM debian:bookworm-slim AS bgcode-builder
 ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates cmake g++ git make ninja-build python3 && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates cmake g++ git make ninja-build python3 zlib1g-dev && rm -rf /var/lib/apt/lists/*
 ARG LIBBGCODE_REF=main
 RUN git clone --depth 1 --branch "${LIBBGCODE_REF}" https://github.com/prusa3d/libbgcode.git /src/libbgcode \
     && cd /src/libbgcode \
