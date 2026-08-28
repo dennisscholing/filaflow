@@ -7,13 +7,13 @@ Deze installatie gebruikt Synology DSM 7.2 met **Container Manager**. De NAS bou
 De meegeleverde workflow `.github/workflows/container.yml` bouwt beide architecturen en publiceert naar GitHub Container Registry. De standaardwaarde `ghcr.io/filaflow-app/filaflow:latest` is een voorbeeld en werkt pas als daar daadwerkelijk een publieke image staat.
 
 1. Plaats de broncode in een GitHub-repository.
-2. Push naar de standaardbranch of maak een tag, bijvoorbeeld `v0.1.1`.
+2. Push naar de standaardbranch of maak een tag, bijvoorbeeld `v0.1.2`.
 3. Controleer in GitHub onder **Actions** of `Multi-arch container` geslaagd is.
 4. Maak het GHCR-package publiek, zodat Synology zonder registry-wachtwoord kan downloaden.
 5. Gebruik bij voorkeur een vaste versie in `.env`:
 
    ```dotenv
-   FILAFLOW_IMAGE=ghcr.io/JOUW-GITHUB-NAAM/filaflow:v0.1.1
+   FILAFLOW_IMAGE=ghcr.io/JOUW-GITHUB-NAAM/filaflow:v0.1.2
    ```
 
 Gebruik `latest` alleen voor testen; een vaste tag maakt terugrollen voorspelbaar.
@@ -54,7 +54,7 @@ Gebruik geen `chmod 777`. Als je opslagvolume niet `volume1` heet, pas zowel dez
 Minimale configuratie:
 
 ```dotenv
-FILAFLOW_IMAGE=ghcr.io/JOUW-GITHUB-NAAM/filaflow:v0.1.1
+FILAFLOW_IMAGE=ghcr.io/JOUW-GITHUB-NAAM/filaflow:v0.1.2
 FILAFLOW_DATA_ROOT=/volume1/docker/filaflow
 FILAFLOW_PORT=9000
 FILAFLOW_PUBLIC_URL=http://192.168.1.10:9000

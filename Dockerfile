@@ -1,5 +1,5 @@
 FROM debian:bookworm-slim AS bgcode-builder
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates cmake g++ git ninja-build python3 && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates cmake g++ git make ninja-build python3 && rm -rf /var/lib/apt/lists/*
 ARG LIBBGCODE_REF=main
 RUN git clone --depth 1 --branch "${LIBBGCODE_REF}" https://github.com/prusa3d/libbgcode.git /src/libbgcode \
     && cd /src/libbgcode \
