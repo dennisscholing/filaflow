@@ -1,10 +1,13 @@
-"""Seed and verify a representative v0.1.6 PostgreSQL database in CI."""
+"""Seed and verify a representative v0.2.0 database during release checks."""
 from __future__ import annotations
 
 import sys
+import uuid
+from datetime import datetime, timezone
+from decimal import Decimal
 
 from argon2 import PasswordHasher
-from sqlalchemy import text
+from sqlalchemy import MetaData, Table, func, select, text
 
 from app.database import engine
 
@@ -18,116 +21,99 @@ USAGE_ID = "00000000-0000-7000-8000-000000000006"
 LEDGER_ID = "00000000-0000-7000-8000-000000000007"
 
 
+def identifier(value: str) -> uuid.UUID | str:
+    parsed = uuid.UUID(value)
+    # SQLite reflects Alembic's UUID columns as CHAR(32), whereas PostgreSQL
+    # preserves their native UUID type.
+    return parsed.hex if engine.dialect.name == "sqlite" else parsed
+
+
+def normalized_identifier(value: uuid.UUID | str) -> str:
+    return str(uuid.UUID(str(value)))
+
+
+def reflected(*names: str) -> dict[str, Table]:
+    metadata = MetaData()
+    return {name: Table(name, metadata, autoload_with=engine) for name in names}
+
+
 def seed() -> None:
+    tables = reflected("users", "printers", "spools", "printer_tools", "api_tokens", "print_jobs", "job_usages", "inventory_entries")
+    created_at = datetime.now(timezone.utc)
     with engine.begin() as connection:
-        connection.execute(
-            text("""INSERT INTO users
-                (id, email, display_name, password_hash, role, preferred_unit, active, created_at)
-                VALUES (:id, 'admin@test.local', 'Upgrade Administrator', :password, 'admin', 'both', true, now())"""),
-            {"id": USER_ID, "password": PasswordHasher().hash("test-password-123")},
-        )
-        connection.execute(
-            text("""INSERT INTO printers
-                (id, code, name, manufacturer, model, slicer_profile, notes, archived, created_at)
-                VALUES (:id, 'PRN-0001', 'INDX fixture', 'Prusa', 'INDX', 'INDX fixture profile',
-                        'Must survive upgrade', false, now())"""),
-            {"id": PRINTER_ID},
-        )
-        connection.execute(
-            text("""INSERT INTO spools
-                (id, code, brand, material_name, material_type, color_name, color_hex, location,
-                 lot_number, serial_number, diameter_mm, density_g_cm3, tare_weight_mg,
-                 initial_weight_mg, remaining_weight_mg, initial_length_mm, remaining_length_mm,
-                 low_stock_weight_mg, purchase_price_cents, currency, opt_brand_uuid,
-                 opt_material_uuid, opt_package_uuid, opt_container_uuid, catalog_snapshot,
-                 archived, discrepancy, created_at)
-                VALUES (:id, 'SPL-0001', 'Fixture brand', 'Fixture PLA', 'PLA', 'Red', '#FF0000',
-                        'Shelf A', 'LOT-UPGRADE', 'SER-UPGRADE', 1.750, 1.2400, 210000,
-                        1000000, 765432, 335000.000, 256410.000, 100000, 2595, 'EUR',
-                        NULL, NULL, NULL, NULL, CAST('{}' AS json), false, false, now())"""),
-            {"id": SPOOL_ID},
-        )
+        connection.execute(tables["users"].insert().values(
+            id=identifier(USER_ID), email="admin@test.local", display_name="Upgrade Administrator",
+            password_hash=PasswordHasher().hash("test-password-123"), role="admin",
+            preferred_unit="both", active=True, created_at=created_at,
+        ))
+        connection.execute(tables["printers"].insert().values(
+            id=identifier(PRINTER_ID), code="PRN-0001", name="INDX fixture", manufacturer="Prusa",
+            model="INDX", slicer_profile="INDX fixture profile", notes="Must survive upgrade",
+            archived=False, created_at=created_at,
+        ))
+        connection.execute(tables["spools"].insert().values(
+            id=identifier(SPOOL_ID), code="SPL-0001", brand="Fixture brand", material_name="Fixture PLA",
+            material_type="PLA", color_name="Red", color_hex="#FF0000", location="Shelf A",
+            lot_number="LOT-UPGRADE", serial_number="SER-UPGRADE", diameter_mm=Decimal("1.750"),
+            density_g_cm3=Decimal("1.2400"), tare_weight_mg=210000, initial_weight_mg=1000000,
+            remaining_weight_mg=765432, initial_length_mm=Decimal("335000"),
+            remaining_length_mm=Decimal("256410"), low_stock_weight_mg=100000,
+            purchase_price_cents=2595, currency="EUR", catalog_snapshot={}, archived=False,
+            discrepancy=False, created_at=created_at,
+        ))
         for index in range(1, 9):
-            tool_id = f"00000000-0000-7000-8000-{100 + index:012d}"
-            connection.execute(
-                text("""INSERT INTO printer_tools
-                    (id, printer_id, slicer_index, label, nozzle_diameter_mm, loaded_spool_id, archived)
-                    VALUES (:id, :printer, :index, :label, 0.400, :spool, false)"""),
-                {
-                    "id": tool_id,
-                    "printer": PRINTER_ID,
-                    "index": index,
-                    "label": f"T{index}",
-                    "spool": SPOOL_ID if index == 1 else None,
-                },
-            )
-        connection.execute(
-            text("""INSERT INTO api_tokens
-                (id, name, token_hash, token_prefix, printer_id, created_by_id, revoked_at, last_used_at, created_at)
-                VALUES (:id, 'Fixture hook', :hash, 'ff_fixture', :printer, :user, NULL, NULL, now())"""),
-            {"id": TOKEN_ID, "hash": "a" * 64, "printer": PRINTER_ID, "user": USER_ID},
-        )
-        connection.execute(
-            text("""INSERT INTO print_jobs
-                (id, code, printer_id, filename, display_name, idempotency_key, file_sha256, status,
-                 estimated_seconds, printer_snapshot, parser_warnings, submitted_by_id, booked_by_id,
-                 created_at, booked_at)
-                VALUES (:id, 'JOB-20260828-0001', :printer, 'fixture.gcode', 'fixture', 'fixture-idem',
-                        :hash, 'MAPPED', 120, CAST('{"code":"PRN-0001","tools":[]}' AS json),
-                        CAST('[]' AS json), :user, NULL, now(), NULL)"""),
-            {"id": JOB_ID, "printer": PRINTER_ID, "hash": "b" * 64, "user": USER_ID},
-        )
-        connection.execute(
-            text("""INSERT INTO job_usages
-                (id, job_id, tool_id, tool_index, tool_label, material_type, color_hex,
-                 diameter_mm, density_g_cm3, estimated_length_mm, estimated_weight_mg,
-                 actual_length_mm, actual_weight_mg, mapped_spool_id, suggested_spool_id)
-                VALUES (:id, :job, :tool, 1, 'T1', 'PLA', '#FF0000', 1.750, 1.2400,
-                        1000.000, 3000, NULL, NULL, :spool, :spool)"""),
-            {
-                "id": USAGE_ID,
-                "job": JOB_ID,
-                "tool": "00000000-0000-7000-8000-000000000101",
-                "spool": SPOOL_ID,
-            },
-        )
-        connection.execute(
-            text("""INSERT INTO inventory_entries
-                (id, spool_id, kind, weight_delta_mg, length_delta_mm, diameter_mm, density_g_cm3,
-                 note, job_id, actor_id, created_at)
-                VALUES (:id, :spool, 'INITIAL', 1000000, 335000.000, 1.750, 1.2400,
-                        'Upgrade fixture', NULL, :user, now())"""),
-            {"id": LEDGER_ID, "spool": SPOOL_ID, "user": USER_ID},
-        )
+            connection.execute(tables["printer_tools"].insert().values(
+                id=identifier(f"00000000-0000-7000-8000-{100 + index:012d}"),
+                printer_id=identifier(PRINTER_ID), slicer_index=index, label=f"T{index}",
+                nozzle_diameter_mm=Decimal("0.400"),
+                loaded_spool_id=identifier(SPOOL_ID) if index == 1 else None, archived=False,
+            ))
+        connection.execute(tables["api_tokens"].insert().values(
+            id=identifier(TOKEN_ID), name="Fixture hook", token_hash="a" * 64,
+            token_prefix="ff_fixture", printer_id=identifier(PRINTER_ID),
+            created_by_id=identifier(USER_ID), created_at=created_at,
+        ))
+        connection.execute(tables["print_jobs"].insert().values(
+            id=identifier(JOB_ID), code="JOB-20260828-0001", printer_id=identifier(PRINTER_ID),
+            filename="fixture.gcode", display_name="fixture", idempotency_key="fixture-idem",
+            file_sha256="b" * 64, status="MAPPED", estimated_seconds=120,
+            printer_snapshot={"code": "PRN-0001", "tools": []}, parser_warnings=[],
+            submitted_by_id=identifier(USER_ID), created_at=created_at,
+        ))
+        connection.execute(tables["job_usages"].insert().values(
+            id=identifier(USAGE_ID), job_id=identifier(JOB_ID),
+            tool_id=identifier("00000000-0000-7000-8000-000000000101"), tool_index=1,
+            tool_label="T1", material_type="PLA", color_hex="#FF0000",
+            diameter_mm=Decimal("1.750"), density_g_cm3=Decimal("1.2400"),
+            estimated_length_mm=Decimal("1000"), estimated_weight_mg=3000,
+            mapped_spool_id=identifier(SPOOL_ID), suggested_spool_id=identifier(SPOOL_ID),
+        ))
+        connection.execute(tables["inventory_entries"].insert().values(
+            id=identifier(LEDGER_ID), spool_id=identifier(SPOOL_ID), kind="INITIAL",
+            weight_delta_mg=1000000, length_delta_mm=Decimal("335000"),
+            diameter_mm=Decimal("1.750"), density_g_cm3=Decimal("1.2400"),
+            note="Upgrade fixture", actor_id=identifier(USER_ID), created_at=created_at,
+        ))
 
 
 def verify() -> None:
+    tables = reflected("printers", "printer_tools", "spools", "api_tokens", "print_jobs", "inventory_entries", "label_templates", "inventory_settings")
     with engine.connect() as connection:
-        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0003_printer_location"
-        printer = connection.execute(
-            text("SELECT id::text, code, location FROM printers WHERE id = CAST(:id AS uuid)"),
-            {"id": PRINTER_ID},
-        ).one()
-        assert printer == (PRINTER_ID, "PRN-0001", "")
-        tools = connection.execute(
-            text("SELECT slicer_index, label FROM printer_tools WHERE printer_id = CAST(:id AS uuid) ORDER BY slicer_index"),
-            {"id": PRINTER_ID},
-        ).all()
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0004_v030_ui_labels"
+        printer = connection.execute(select(tables["printers"].c.id, tables["printers"].c.code, tables["printers"].c.location).where(tables["printers"].c.id == identifier(PRINTER_ID))).one()
+        assert (normalized_identifier(printer.id), printer.code, printer.location) == (PRINTER_ID, "PRN-0001", "")
+        tools = connection.execute(select(tables["printer_tools"].c.slicer_index, tables["printer_tools"].c.label).where(tables["printer_tools"].c.printer_id == identifier(PRINTER_ID)).order_by(tables["printer_tools"].c.slicer_index)).all()
         assert tools == [(index, f"T{index}") for index in range(1, 9)]
-        spool = connection.execute(
-            text("SELECT id::text, code, remaining_weight_mg, remaining_length_mm FROM spools WHERE id = CAST(:id AS uuid)"),
-            {"id": SPOOL_ID},
-        ).one()
-        assert str(spool[0]) == SPOOL_ID
-        assert spool[1:] == ("SPL-0001", 765432, 256410)
-        assert connection.scalar(text("SELECT count(*) FROM api_tokens WHERE id = CAST(:id AS uuid)"), {"id": TOKEN_ID}) == 1
-        assert connection.scalar(text("SELECT count(*) FROM print_jobs WHERE id = CAST(:id AS uuid)"), {"id": JOB_ID}) == 1
-        ledger = connection.execute(
-            text("SELECT weight_delta_mg, length_delta_mm FROM inventory_entries WHERE id = CAST(:id AS uuid)"),
-            {"id": LEDGER_ID},
-        ).one()
+        spool = connection.execute(select(tables["spools"].c.id, tables["spools"].c.code, tables["spools"].c.remaining_weight_mg, tables["spools"].c.remaining_length_mm).where(tables["spools"].c.id == identifier(SPOOL_ID))).one()
+        assert normalized_identifier(spool.id) == SPOOL_ID
+        assert (spool.code, spool.remaining_weight_mg, spool.remaining_length_mm) == ("SPL-0001", 765432, 256410)
+        assert connection.scalar(select(func.count()).select_from(tables["api_tokens"]).where(tables["api_tokens"].c.id == identifier(TOKEN_ID))) == 1
+        assert connection.scalar(select(func.count()).select_from(tables["print_jobs"]).where(tables["print_jobs"].c.id == identifier(JOB_ID))) == 1
+        ledger = connection.execute(select(tables["inventory_entries"].c.weight_delta_mg, tables["inventory_entries"].c.length_delta_mm).where(tables["inventory_entries"].c.id == identifier(LEDGER_ID))).one()
         assert ledger == (1000000, 335000)
-    print("Representative v0.1.6 upgrade preserved identities, tools, relationships, and inventory")
+        assert connection.scalar(select(func.count()).select_from(tables["label_templates"]).where(tables["label_templates"].c.builtin.is_(True))) == 3
+        assert connection.scalar(select(tables["inventory_settings"].c.reorder_threshold_mg).where(tables["inventory_settings"].c.id == 1)) == 500000
+    print("Representative v0.2.0 upgrade preserved identities, tools, relationships, and inventory")
 
 
 if __name__ == "__main__":

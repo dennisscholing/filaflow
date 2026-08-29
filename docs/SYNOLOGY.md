@@ -156,7 +156,7 @@ FilaFlow follows the `latest` image. Container Manager can detect a newer image,
 
 To update:
 
-1. For the first v0.2 update, download the current `docker-compose.yml`, `.env.example`, and `deploy/backup.sh` from GitHub. Replace the Compose file and backup script in the project folder. Add any new non-secret options from `.env.example` to `.env`; do not overwrite your secrets.
+1. If your installation is older than v0.2, download the current `docker-compose.yml`, `.env.example`, and `deploy/backup.sh` from GitHub. Replace the Compose file and backup script in the project folder. Add any new non-secret options from `.env.example` to `.env`; do not overwrite your secrets. An existing v0.2 installation already has the safe backup mount required by v0.3.
 2. Re-run the permission commands from section 2. An old project without the writable backup mount is intentionally not allowed to migrate the database.
 3. Make a manual database backup.
 4. Open **Container Manager → Image**.
@@ -171,7 +171,7 @@ Fully unattended updating would require a privileged host task or a container wi
 For a controlled image pin or rollback, add this line to `.env` and rebuild the project:
 
 ```dotenv
-FILAFLOW_IMAGE=ghcr.io/dennisscholing/filaflow:v0.1.6
+FILAFLOW_IMAGE=ghcr.io/dennisscholing/filaflow:v0.2.0
 ```
 
 Remove the line later to follow `latest` again. If the failed update changed the schema, restore its verified `backups/pre-upgrade` dump before starting the older image. Reverting only the image may be unsafe after a database migration.

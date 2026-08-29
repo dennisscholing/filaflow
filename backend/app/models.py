@@ -200,4 +200,39 @@ class AuditEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, index=True)
 
 
+class LabelTemplate(Base):
+    __tablename__ = "label_templates"
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid7)
+    name: Mapped[str] = mapped_column(String(120), unique=True)
+    width_mm: Mapped[Decimal] = mapped_column(Numeric(7, 2))
+    height_mm: Mapped[Decimal] = mapped_column(Numeric(7, 2))
+    layout: Mapped[list] = mapped_column(JSON, default=list)
+    builtin: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    archived: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    created_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
+
+
+class InventorySetting(Base):
+    __tablename__ = "inventory_settings"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    reorder_threshold_mg: Mapped[int] = mapped_column(Integer, default=500_000)
+    updated_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
+
+
+class ReorderRule(Base):
+    __tablename__ = "reorder_rules"
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid7)
+    product_key: Mapped[str] = mapped_column(String(500), unique=True, index=True)
+    threshold_mg: Mapped[int | None] = mapped_column(Integer)
+    ignored: Mapped[bool] = mapped_column(Boolean, default=False)
+    product_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    updated_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
+
+
 Index("ix_spool_active_material", Spool.archived, Spool.material_type)

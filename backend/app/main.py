@@ -10,15 +10,10 @@ import re
 import secrets
 import shutil
 import uuid
-import xml.etree.ElementTree as ET
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-from xml.sax.saxutils import escape
-
-import qrcode
-import qrcode.image.svg
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -30,17 +25,18 @@ from sqlalchemy.orm import Session, selectinload
 from .audit import audit
 from .auth import admin_user, clear_session, current_user, hash_password, issue_api_token, set_session, token_hash, verify_password
 from .catalog import CatalogSyncError, catalog_metadata, sync_catalog
-from .colors import nearest_color
+from .colors import color_distance, nearest_color
 from .config import settings
 from .database import SessionLocal, get_db
 from .gcode import parse_gcode
 from .ids import next_code
-from .models import ApiToken, AuditEvent, CatalogMaterial, CatalogSnapshot, InventoryEntry, JobUsage, PrintJob, Printer, PrinterTool, Spool, User, now_utc
-from .schemas import JobBookInput, JobMapInput, JobPrinterInput, LoadoutInput, LoginInput, PrinterInput, PrinterUpdateInput, SpoolInput, SpoolUpdateInput, TokenInput, UserCreateInput, UserStatusInput, WeighInput
+from .labels import DEFAULT_LAYOUT, render_label, template_json, validate_layout
+from .models import ApiToken, AuditEvent, CatalogMaterial, CatalogSnapshot, InventoryEntry, InventorySetting, JobUsage, LabelTemplate, PrintJob, Printer, PrinterTool, ReorderRule, Spool, User, now_utc
+from .schemas import InventorySettingsInput, JobBookInput, JobMapInput, JobPrinterInput, LabelTemplateInput, LoadoutInput, LoginInput, PrinterInput, PrinterUpdateInput, ReorderRuleInput, SpoolInput, SpoolUpdateInput, TokenInput, UserCreateInput, UserPreferenceInput, UserStatusInput, WeighInput
 from .units import grams_to_mg, length_mm_to_weight_mg, mg_to_grams, weight_mg_to_length_mm
 
 
-app = FastAPI(title="FilaFlow API", version="0.2.0", docs_url="/api/docs", redoc_url=None)
+app = FastAPI(title="FilaFlow API", version="0.3.0", docs_url="/api/docs", redoc_url=None)
 
 
 def spool_json(db: Session, spool: Spool) -> dict:
@@ -49,17 +45,20 @@ def spool_json(db: Session, spool: Spool) -> dict:
         reserved_weight = db.scalar(select(func.coalesce(func.sum(JobUsage.estimated_weight_mg), 0)).join(PrintJob).where(JobUsage.mapped_spool_id == spool.id, PrintJob.status == "MAPPED")) or 0
     reserved_length = db.scalar(select(func.coalesce(func.sum(JobUsage.estimated_length_mm), 0)).join(PrintJob).where(JobUsage.mapped_spool_id == spool.id, PrintJob.status == "MAPPED")) or Decimal("0")
     loaded = db.scalar(select(PrinterTool).where(PrinterTool.loaded_spool_id == spool.id).options(selectinload(PrinterTool.printer)))
+    last_weighed = db.scalar(select(InventoryEntry.created_at).where(InventoryEntry.spool_id == spool.id, InventoryEntry.kind == "WEIGHING").order_by(InventoryEntry.created_at.desc()).limit(1))
     return {
         "id": str(spool.id), "code": spool.code, "brand": spool.brand, "materialName": spool.material_name, "materialType": spool.material_type,
         "colorName": spool.color_name, "colorHex": spool.color_hex, "location": spool.location, "lotNumber": spool.lot_number, "serialNumber": spool.serial_number, "diameterMm": float(spool.diameter_mm), "density": float(spool.density_g_cm3), "tareWeightG": mg_to_grams(spool.tare_weight_mg), "lowStockWeightG": mg_to_grams(spool.low_stock_weight_mg),
         "initialWeightG": mg_to_grams(spool.initial_weight_mg), "remainingWeightG": mg_to_grams(spool.remaining_weight_mg), "reservedWeightG": mg_to_grams(int(reserved_weight)),
         "availableWeightG": mg_to_grams(spool.remaining_weight_mg - int(reserved_weight)), "initialLengthM": float(spool.initial_length_mm / 1000),
-        "remainingLengthM": float(spool.remaining_length_mm / 1000), "reservedLengthM": float(Decimal(reserved_length) / 1000),
+        "remainingLengthM": float(spool.remaining_length_mm / 1000), "reservedLengthM": float(Decimal(reserved_length) / 1000), "availableLengthM": float((spool.remaining_length_mm - Decimal(reserved_length)) / 1000),
         "remainingPercent": round((spool.remaining_weight_mg / spool.initial_weight_mg * 100) if spool.initial_weight_mg else 0, 1),
         "lowStock": spool.remaining_weight_mg <= spool.low_stock_weight_mg, "archived": spool.archived, "discrepancy": spool.discrepancy,
-        "loadedOn": {"printer": loaded.printer.name, "printerCode": loaded.printer.code, "tool": loaded.label} if loaded else None,
+        "loadedOn": {"printerId": str(loaded.printer.id), "printer": loaded.printer.name, "printerCode": loaded.printer.code, "toolId": str(loaded.id), "tool": loaded.label} if loaded else None,
+        "lastWeighedAt": last_weighed.isoformat() if last_weighed else None,
         "purchasePrice": spool.purchase_price_cents / 100 if spool.purchase_price_cents is not None else None, "currency": spool.currency,
         "catalogSnapshot": spool.catalog_snapshot,
+        "productKey": product_key(spool),
         "openPrintTag": {"brandUuid": str(spool.opt_brand_uuid) if spool.opt_brand_uuid else None, "materialUuid": str(spool.opt_material_uuid) if spool.opt_material_uuid else None, "packageUuid": str(spool.opt_package_uuid) if spool.opt_package_uuid else None, "containerUuid": str(spool.opt_container_uuid) if spool.opt_container_uuid else None},
     }
 
@@ -67,7 +66,7 @@ def spool_json(db: Session, spool: Spool) -> dict:
 def printer_json(printer: Printer) -> dict:
     return {"id": str(printer.id), "code": printer.code, "name": printer.name, "manufacturer": printer.manufacturer, "model": printer.model, "location": printer.location, "slicerProfile": printer.slicer_profile, "notes": printer.notes, "archived": printer.archived,
             "tools": [{"id": str(tool.id), "index": tool.slicer_index, "label": tool.label, "nozzleDiameterMm": float(tool.nozzle_diameter_mm) if tool.nozzle_diameter_mm else None,
-                       "loadedSpool": {"id": str(tool.loaded_spool.id), "code": tool.loaded_spool.code, "brand": tool.loaded_spool.brand, "material": tool.loaded_spool.material_name, "colorHex": tool.loaded_spool.color_hex, "remainingWeightG": mg_to_grams(tool.loaded_spool.remaining_weight_mg)} if tool.loaded_spool else None}
+                       "loadedSpool": {"id": str(tool.loaded_spool.id), "code": tool.loaded_spool.code, "brand": tool.loaded_spool.brand, "material": tool.loaded_spool.material_name, "materialType": tool.loaded_spool.material_type, "colorHex": tool.loaded_spool.color_hex, "remainingWeightG": mg_to_grams(tool.loaded_spool.remaining_weight_mg), "remainingLengthM": float(tool.loaded_spool.remaining_length_mm / 1000)} if tool.loaded_spool else None}
                       for tool in printer.tools if not tool.archived]}
 
 
@@ -93,45 +92,33 @@ def printer_snapshot(printer: Printer, source_profile: str = "", physical_profil
 
 
 def render_spool_label(spool: Spool, target: str) -> bytes:
-    factory = qrcode.image.svg.SvgPathImage
-    qr = qrcode.make(target, image_factory=factory, box_size=8, border=1)
-    qr_root = ET.fromstring(qr.to_string(encoding="unicode"))
-    qr_path = next(element for element in qr_root.iter() if element.tag.endswith("path"))
-    _, _, qr_width, qr_height = [float(value) for value in qr_root.attrib["viewBox"].split()]
-    qr_size = 270
-    scale = qr_size / max(qr_width, qr_height)
-    qr_x = 20 + (qr_size - qr_width * scale) / 2
-    qr_y = 25 + (qr_size - qr_height * scale) / 2
-
-    def short(value: str, limit: int) -> str:
-        value = value.strip()
-        return value if len(value) <= limit else f"{value[: limit - 1]}…"
-
-    code = escape(spool.code)
-    material = escape(short(spool.material_name, 40))
-    description = escape(short(" · ".join(value for value in (spool.brand, spool.material_type) if value), 48))
-    color_name = escape(short(spool.color_name or "Unnamed color", 34))
-    serial_number = escape(short(spool.serial_number or spool.code, 34))
-    color_hex = spool.color_hex if re.fullmatch(r"#[0-9A-Fa-f]{6}(?:[0-9A-Fa-f]{2})?", spool.color_hex or "") else "#808080"
-    path_data = escape(qr_path.attrib["d"])
-    svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="90mm" height="32mm" viewBox="0 0 900 320">
-  <rect width="900" height="320" rx="18" fill="#ffffff"/>
-  <rect x="1" y="1" width="898" height="318" rx="17" fill="none" stroke="#d1d5db" stroke-width="2"/>
-  <g transform="translate({qr_x:.3f} {qr_y:.3f}) scale({scale:.6f})"><path d="{path_data}" fill="#111827"/></g>
-  <g font-family="Open Sans, Arial, sans-serif" fill="#111827">
-    <text x="330" y="68" font-size="38" font-weight="700">{code}</text>
-    <text x="330" y="122" font-size="30" font-weight="700">{material}</text>
-    <text x="330" y="160" font-size="21" fill="#4b5563">{description}</text>
-    <rect x="330" y="184" width="34" height="34" rx="7" fill="{color_hex}" stroke="#d1d5db" stroke-width="2"/>
-    <text x="380" y="209" font-size="20" fill="#374151">{color_name}</text>
-    <text x="330" y="270" font-size="20" fill="#4b5563">Spool S/N: <tspan font-weight="700" fill="#111827">{serial_number}</tspan></text>
-  </g>
-</svg>'''
-    return svg.encode("utf-8")
+    return render_label(spool, target, 90, 32, DEFAULT_LAYOUT)
 
 
 def user_json(user: User) -> dict:
     return {"id": str(user.id), "email": user.email, "displayName": user.display_name, "role": user.role, "preferredUnit": user.preferred_unit, "active": user.active, "createdAt": user.created_at.isoformat()}
+
+
+def product_key(spool: Spool) -> str:
+    diameter = f"{Decimal(spool.diameter_mm):.3f}"
+    if spool.opt_brand_uuid and spool.opt_material_uuid:
+        return f"opt:{spool.opt_brand_uuid}:{spool.opt_material_uuid}:{diameter}"
+    fields = (spool.brand, spool.material_name, spool.material_type, spool.color_hex, diameter)
+    return "manual:" + "|".join(re.sub(r"\s+", " ", str(value).strip().casefold()) for value in fields)
+
+
+def inventory_setting(db: Session) -> InventorySetting:
+    record = db.get(InventorySetting, 1)
+    if not record:
+        record = InventorySetting(id=1, reorder_threshold_mg=500_000)
+        db.add(record)
+        db.flush()
+    return record
+
+
+def latest_revision(db: Session) -> dict:
+    event = db.scalar(select(AuditEvent).order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc()).limit(1))
+    return {"revision": str(event.id) if event else "0", "changedAt": event.created_at.isoformat() if event else None}
 
 
 def bootstrap() -> None:
@@ -196,6 +183,25 @@ def me(user: User = Depends(current_user)):
     return user_json(user)
 
 
+@app.put("/api/account/preferences")
+def account_preferences(data: UserPreferenceInput, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    old = user.preferred_unit
+    user.preferred_unit = data.preferred_unit
+    audit(db, user, "account.preferences_updated", "user", user.id, {"preferredUnit": {"old": old, "new": user.preferred_unit}})
+    db.commit()
+    return user_json(user)
+
+
+@app.get("/api/state/revision")
+def state_revision(request: Request, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    payload = latest_revision(db)
+    etag = f'"{payload["revision"]}"'
+    headers = {"ETag": etag, "Cache-Control": "private, no-cache, must-revalidate"}
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+    return JSONResponse(payload, headers=headers)
+
+
 @app.get("/api/users")
 def list_users(db: Session = Depends(get_db), user: User = Depends(admin_user)):
     return [user_json(row) for row in db.scalars(select(User).order_by(User.display_name, User.email)).all()]
@@ -238,6 +244,105 @@ def update_user_status(user_id: uuid.UUID, data: UserStatusInput, db: Session = 
     return user_json(record)
 
 
+def reorder_payload(db: Session, include_all: bool = False) -> dict:
+    global_setting = inventory_setting(db)
+    rules = {rule.product_key: rule for rule in db.scalars(select(ReorderRule)).all()}
+    grouped: dict[str, dict] = {}
+    for spool in db.scalars(select(Spool).where(Spool.archived.is_(False))).all():
+        item = spool_json(db, spool)
+        key = product_key(spool)
+        group = grouped.setdefault(key, {
+            "productKey": key, "brand": spool.brand, "materialName": spool.material_name,
+            "materialType": spool.material_type, "colorName": spool.color_name, "colorHex": spool.color_hex,
+            "diameterMm": float(spool.diameter_mm), "spoolCount": 0,
+            "remainingWeightG": 0.0, "reservedWeightG": 0.0, "availableWeightG": 0.0,
+            "remainingLengthM": 0.0, "reservedLengthM": 0.0, "availableLengthM": 0.0,
+        })
+        group["spoolCount"] += 1
+        for field in ("remainingWeightG", "reservedWeightG", "availableWeightG", "remainingLengthM", "reservedLengthM", "availableLengthM"):
+            group[field] += item[field]
+    result = []
+    for key, group in grouped.items():
+        rule = rules.get(key)
+        threshold_mg = rule.threshold_mg if rule and rule.threshold_mg is not None else global_setting.reorder_threshold_mg
+        group["thresholdG"] = mg_to_grams(threshold_mg)
+        group["ignored"] = bool(rule and rule.ignored)
+        group["shortageG"] = max(0.0, group["thresholdG"] - group["availableWeightG"])
+        group["needsOrdering"] = not group["ignored"] and group["availableWeightG"] < group["thresholdG"]
+        for field in ("remainingWeightG", "reservedWeightG", "availableWeightG", "remainingLengthM", "reservedLengthM", "availableLengthM", "shortageG"):
+            group[field] = round(group[field], 3)
+        if include_all or group["needsOrdering"]: result.append(group)
+    result.sort(key=lambda item: (-item["shortageG"], item["brand"].casefold(), item["materialName"].casefold()))
+    return {"defaultThresholdG": mg_to_grams(global_setting.reorder_threshold_mg), "groups": result}
+
+
+def operational_status(db: Session) -> dict:
+    now = now_utc()
+    def utc_value(value: datetime | None) -> datetime | None:
+        return value.replace(tzinfo=timezone.utc) if value and value.tzinfo is None else value
+    snapshot = db.scalar(select(CatalogSnapshot).where(CatalogSnapshot.active.is_(True)))
+    catalog_failure = db.scalar(select(AuditEvent).where(AuditEvent.action == "catalog.sync_failed").order_by(AuditEvent.created_at.desc()).limit(1))
+    snapshot_at = utc_value(snapshot.created_at) if snapshot else None
+    failure_at = utc_value(catalog_failure.created_at) if catalog_failure else None
+    catalog_failed = bool(failure_at and (not snapshot_at or failure_at > snapshot_at))
+    backup_files = []
+    with contextlib.suppress(OSError):
+        backup_files = [path for path in settings.backup_dir.rglob("*.dump") if path.is_file()]
+    latest_backup = max((datetime.fromtimestamp(path.stat().st_mtime, timezone.utc) for path in backup_files), default=None)
+    oldest_job = db.scalar(select(PrintJob.created_at).where(PrintJob.status.in_(["NEW", "MAPPED", "NEEDS_REVIEW"])).order_by(PrintJob.created_at).limit(1))
+    stale_jobs = db.scalar(select(func.count()).select_from(PrintJob).where(PrintJob.status.in_(["NEW", "MAPPED", "NEEDS_REVIEW"]), PrintJob.created_at < now - timedelta(days=7))) or 0
+    open_job_rows = db.scalars(select(PrintJob).where(PrintJob.status.in_(["NEW", "MAPPED", "NEEDS_REVIEW"]))).all()
+    unknown_profiles = sum(1 for job in open_job_rows if job.printer_snapshot.get("routingMode") == "default")
+    unweighed = 0
+    for spool in db.scalars(select(Spool).where(Spool.archived.is_(False))).all():
+        weighed = db.scalar(select(InventoryEntry.created_at).where(InventoryEntry.spool_id == spool.id, InventoryEntry.kind == "WEIGHING").order_by(InventoryEntry.created_at.desc()).limit(1))
+        weighed_at, created_at = utc_value(weighed), utc_value(spool.created_at)
+        if (weighed_at and weighed_at < now - timedelta(days=90)) or (not weighed_at and created_at and created_at < now - timedelta(days=90)): unweighed += 1
+    return {
+        "catalog": {"ready": bool(snapshot), "updatedAt": snapshot_at.isoformat() if snapshot_at else None, "stale": not snapshot_at or snapshot_at < now - timedelta(days=2), "failed": catalog_failed},
+        "backup": {"ready": bool(latest_backup), "updatedAt": latest_backup.isoformat() if latest_backup else None, "stale": not latest_backup or latest_backup < now - timedelta(days=2)},
+        "oldestOpenJobAt": oldest_job.isoformat() if oldest_job else None,
+        "staleJobs": stale_jobs, "unknownProfiles": unknown_profiles, "unweighedSpools": unweighed,
+    }
+
+
+@app.get("/api/inventory/reorder-suggestions")
+def reorder_suggestions(all_groups: bool = Query(False, alias="all"), db: Session = Depends(get_db), user: User = Depends(current_user)):
+    return reorder_payload(db, all_groups)
+
+
+@app.put("/api/inventory/settings")
+def update_inventory_settings(data: InventorySettingsInput, db: Session = Depends(get_db), user: User = Depends(admin_user)):
+    record = inventory_setting(db); old = record.reorder_threshold_mg
+    record.reorder_threshold_mg = grams_to_mg(data.reorder_threshold_g); record.updated_by_id = user.id; record.updated_at = now_utc()
+    audit(db, user, "inventory.settings_updated", "inventory_settings", None, {"reorderThresholdMg": {"old": old, "new": record.reorder_threshold_mg}}); db.commit()
+    return {"reorderThresholdG": mg_to_grams(record.reorder_threshold_mg)}
+
+
+@app.put("/api/inventory/reorder-rules")
+def update_reorder_rule(data: ReorderRuleInput, db: Session = Depends(get_db), user: User = Depends(admin_user)):
+    record = db.scalar(select(ReorderRule).where(ReorderRule.product_key == data.product_key).with_for_update())
+    if not record:
+        record = ReorderRule(product_key=data.product_key, updated_by_id=user.id)
+        db.add(record)
+    record.threshold_mg = grams_to_mg(data.threshold_g) if data.threshold_g is not None else None
+    record.ignored, record.product_snapshot, record.updated_by_id, record.updated_at = data.ignored, data.product_snapshot, user.id, now_utc()
+    db.flush(); audit(db, user, "inventory.reorder_rule_updated", "reorder_rule", record.id, {"productKey": record.product_key}); db.commit()
+    return {"id": str(record.id), "productKey": record.product_key, "thresholdG": mg_to_grams(record.threshold_mg) if record.threshold_mg is not None else None, "ignored": record.ignored}
+
+
+@app.get("/api/operational-status")
+def get_operational_status(db: Session = Depends(get_db), user: User = Depends(current_user)):
+    return operational_status(db)
+
+
+@app.get("/api/activity")
+def entity_activity(entity_type: str, entity_id: uuid.UUID, limit: int = Query(50, ge=1, le=200), db: Session = Depends(get_db), user: User = Depends(current_user)):
+    if entity_type not in {"spool", "printer", "printer_tool", "print_job"}: raise HTTPException(422, "Unsupported activity entity")
+    rows = db.scalars(select(AuditEvent).where(AuditEvent.entity_type == entity_type, AuditEvent.entity_id == entity_id).order_by(AuditEvent.created_at.desc()).limit(limit)).all()
+    return [{"id": str(row.id), "action": row.action, "details": row.details, "createdAt": row.created_at.isoformat()} for row in rows]
+
+
 @app.get("/api/dashboard")
 def dashboard(db: Session = Depends(get_db), user: User = Depends(current_user)):
     spools = db.scalars(select(Spool).where(Spool.archived.is_(False))).all()
@@ -248,16 +353,46 @@ def dashboard(db: Session = Depends(get_db), user: User = Depends(current_user))
     reserved_length = sum(Decimal(str(item["reservedLengthM"])) * 1000 for item in spool_payload)
     printers = db.scalars(select(Printer).where(Printer.archived.is_(False)).options(selectinload(Printer.tools).selectinload(PrinterTool.loaded_spool))).all()
     jobs = db.scalars(select(PrintJob).where(PrintJob.status.in_(["NEW", "MAPPED", "NEEDS_REVIEW"])).options(selectinload(PrintJob.usages)).order_by(PrintJob.created_at.desc()).limit(8)).all()
-    return {"summary": {"remainingWeightG": mg_to_grams(remaining_weight), "remainingLengthM": float(remaining_length / 1000), "reservedWeightG": mg_to_grams(reserved_weight), "reservedLengthM": float(reserved_length / 1000), "availableWeightG": mg_to_grams(remaining_weight - reserved_weight), "availableLengthM": float((remaining_length - reserved_length) / 1000), "activeSpools": len(spools), "lowStockSpools": sum(1 for spool in spools if spool.remaining_weight_mg <= spool.low_stock_weight_mg), "loadedSpools": sum(1 for item in spool_payload if item["loadedOn"]), "openJobs": len(jobs)}, "spools": spool_payload[:8], "printers": [printer_json(p) for p in printers], "jobs": [job_json(j) for j in jobs]}
+    open_job_count = db.scalar(select(func.count()).select_from(PrintJob).where(PrintJob.status.in_(["NEW", "MAPPED", "NEEDS_REVIEW"]))) or 0
+    status = operational_status(db)
+    reorder = reorder_payload(db)
+    return {"summary": {"remainingWeightG": mg_to_grams(remaining_weight), "remainingLengthM": float(remaining_length / 1000), "reservedWeightG": mg_to_grams(reserved_weight), "reservedLengthM": float(reserved_length / 1000), "availableWeightG": mg_to_grams(remaining_weight - reserved_weight), "availableLengthM": float((remaining_length - reserved_length) / 1000), "activeSpools": len(spools), "lowStockSpools": sum(1 for spool in spools if spool.remaining_weight_mg <= spool.low_stock_weight_mg), "loadedSpools": sum(1 for item in spool_payload if item["loadedOn"]), "openJobs": open_job_count, "negativeSpools": sum(1 for item in spool_payload if item["availableWeightG"] < 0)}, "spools": spool_payload[:8], "printers": [printer_json(p) for p in printers], "jobs": [job_json(j) for j in jobs], "attention": status, "reorder": {"defaultThresholdG": reorder["defaultThresholdG"], "groups": reorder["groups"][:8]}}
 
 
 @app.get("/api/spools")
-def list_spools(q: str = "", archived: bool = False, db: Session = Depends(get_db), user: User = Depends(current_user)):
-    statement = select(Spool).where(Spool.archived == archived).order_by(Spool.code.desc())
-    if q:
-        needle = f"%{q}%"
-        statement = statement.where(or_(Spool.code.ilike(needle), Spool.brand.ilike(needle), Spool.material_name.ilike(needle), Spool.material_type.ilike(needle), Spool.location.ilike(needle)))
-    return [spool_json(db, spool) for spool in db.scalars(statement).all()]
+def list_spools(
+    q: str = "", archived: bool = False, brand: str = "", material: str = "", color: str = "", location: str = "",
+    load_state: str = Query("", alias="loadState"), stock_state: str = Query("", alias="stockState"),
+    printer: str = "", color_hex: str = Query("", alias="colorHex"), delta_e: float = Query(12, alias="deltaE", ge=2, le=30),
+    sort: str = "code-desc", db: Session = Depends(get_db), user: User = Depends(current_user),
+):
+    statement = select(Spool).where(Spool.archived == archived)
+    searchable = (Spool.code, Spool.brand, Spool.material_name, Spool.material_type, Spool.color_name, Spool.color_hex, Spool.location, Spool.lot_number, Spool.serial_number)
+    for token in re.findall(r"[^\s]+", q.strip())[:12]:
+        needle = f"%{token}%"
+        statement = statement.where(or_(*(column.ilike(needle) for column in searchable)))
+    if brand: statement = statement.where(func.lower(Spool.brand) == brand.casefold())
+    if material: statement = statement.where(func.lower(Spool.material_type) == material.casefold())
+    if color: statement = statement.where(or_(func.lower(Spool.color_name) == color.casefold(), func.lower(Spool.color_hex) == color.casefold()))
+    if location: statement = statement.where(func.lower(Spool.location) == location.casefold())
+    rows = list(db.scalars(statement).all())
+    payload = [spool_json(db, spool) for spool in rows]
+    if load_state in {"loaded", "unloaded"}:
+        payload = [item for item in payload if bool(item["loadedOn"]) == (load_state == "loaded")]
+    if stock_state in {"low", "healthy", "negative"}:
+        payload = [item for item in payload if (item["availableWeightG"] < 0 if stock_state == "negative" else item["lowStock"] == (stock_state == "low"))]
+    if printer:
+        payload = [item for item in payload if item["loadedOn"] and item["loadedOn"]["printerCode"] == printer]
+    if color_hex:
+        try: payload = [item for item in payload if color_distance(item["colorHex"], color_hex) <= delta_e]
+        except ValueError as exc: raise HTTPException(422, str(exc)) from exc
+    sorters = {
+        "code-asc": lambda item: item["code"], "code-desc": lambda item: item["code"],
+        "brand-asc": lambda item: (item["brand"].casefold(), item["materialName"].casefold()),
+        "available-asc": lambda item: item["availableWeightG"], "available-desc": lambda item: item["availableWeightG"],
+    }
+    if sort not in sorters: raise HTTPException(422, "Unknown spool sort order")
+    return sorted(payload, key=sorters[sort], reverse=sort.endswith("desc"))
 
 
 @app.post("/api/spools", status_code=201)
@@ -270,6 +405,30 @@ def create_spool(data: SpoolInput, db: Session = Depends(get_db), user: User = D
     db.add(InventoryEntry(spool_id=spool.id, kind="INITIAL", weight_delta_mg=weight_mg, length_delta_mm=length_mm, diameter_mm=spool.diameter_mm, density_g_cm3=spool.density_g_cm3, note="New spool", actor_id=user.id))
     audit(db, user, "spool.created", "spool", spool.id, {"code": spool.code}); db.commit()
     return spool_json(db, spool)
+
+
+@app.get("/api/spools/ranked")
+def ranked_spools(
+    material_type: str = Query("", alias="materialType"),
+    color_hex: str = Query("", alias="colorHex"),
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+):
+    """Rank candidates for job mapping without excluding imperfect matches."""
+    rows = db.scalars(select(Spool).where(Spool.archived.is_(False))).all()
+    payload = [spool_json(db, spool) for spool in rows]
+    try:
+        return sorted(
+            payload,
+            key=lambda item: (
+                item["materialType"].casefold() != material_type.casefold(),
+                color_distance(item["colorHex"], color_hex) if color_hex else 0,
+                -item["availableWeightG"],
+                item["code"],
+            ),
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 @app.put("/api/spools/{spool_id}")
@@ -361,12 +520,80 @@ def empty_spool(spool_id: uuid.UUID, db: Session = Depends(get_db), user: User =
 
 
 @app.get("/api/spools/{spool_id}/label.svg")
-def spool_label(spool_id: uuid.UUID, request: Request, db: Session = Depends(get_db), user: User = Depends(current_user)):
+def spool_label(spool_id: uuid.UUID, request: Request, template_id: uuid.UUID | None = Query(default=None, alias="templateId"), monochrome: bool = False, db: Session = Depends(get_db), user: User = Depends(current_user)):
     spool = db.get(Spool, spool_id)
     if not spool: raise HTTPException(404, "Spool not found")
+    template = db.get(LabelTemplate, template_id) if template_id else db.scalar(select(LabelTemplate).where(LabelTemplate.is_default.is_(True), LabelTemplate.archived.is_(False)))
+    if template_id and (not template or template.archived): raise HTTPException(404, "Label template not found")
     base_url = settings.public_url or str(request.base_url)
     target = f"{base_url.rstrip('/')}/spools/{spool.id}"
-    return Response(render_spool_label(spool, target), media_type="image/svg+xml", headers={"Content-Disposition": f'inline; filename="{spool.code}.svg"'})
+    rendered = render_label(spool, target, float(template.width_mm), float(template.height_mm), template.layout, monochrome) if template else render_spool_label(spool, target)
+    return Response(rendered, media_type="image/svg+xml", headers={"Content-Disposition": f'inline; filename="{spool.code}.svg"', "Cache-Control": "private, no-cache"})
+
+
+@app.get("/api/label-templates")
+def list_label_templates(archived: bool = False, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    rows = db.scalars(select(LabelTemplate).where(LabelTemplate.archived == archived).order_by(LabelTemplate.builtin.desc(), LabelTemplate.name)).all()
+    return [template_json(row) for row in rows]
+
+
+@app.post("/api/label-templates", status_code=201)
+def create_label_template(data: LabelTemplateInput, db: Session = Depends(get_db), user: User = Depends(admin_user)):
+    try: layout = validate_layout(data.width_mm, data.height_mm, data.layout)
+    except ValueError as exc: raise HTTPException(422, str(exc)) from exc
+    record = LabelTemplate(name=data.name, width_mm=data.width_mm, height_mm=data.height_mm, layout=layout, created_by_id=user.id)
+    db.add(record)
+    try: db.flush()
+    except IntegrityError: db.rollback(); raise HTTPException(409, "A label template with this name already exists") from None
+    audit(db, user, "label_template.created", "label_template", record.id, {"name": record.name}); db.commit()
+    return template_json(record)
+
+
+@app.put("/api/label-templates/{template_id}")
+def update_label_template(template_id: uuid.UUID, data: LabelTemplateInput, db: Session = Depends(get_db), user: User = Depends(admin_user)):
+    record = db.get(LabelTemplate, template_id, with_for_update=True)
+    if not record or record.archived: raise HTTPException(404, "Label template not found")
+    if record.builtin: raise HTTPException(409, "Built-in templates are immutable; duplicate this template first")
+    try: layout = validate_layout(data.width_mm, data.height_mm, data.layout)
+    except ValueError as exc: raise HTTPException(422, str(exc)) from exc
+    record.name, record.width_mm, record.height_mm, record.layout, record.updated_at = data.name, data.width_mm, data.height_mm, layout, now_utc()
+    try: db.flush()
+    except IntegrityError: db.rollback(); raise HTTPException(409, "A label template with this name already exists") from None
+    audit(db, user, "label_template.updated", "label_template", record.id, {"name": record.name}); db.commit()
+    return template_json(record)
+
+
+@app.post("/api/label-templates/{template_id}/duplicate", status_code=201)
+def duplicate_label_template(template_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(admin_user)):
+    source = db.get(LabelTemplate, template_id)
+    if not source or source.archived: raise HTTPException(404, "Label template not found")
+    base, name, suffix = f"{source.name} copy", f"{source.name} copy", 2
+    while db.scalar(select(LabelTemplate.id).where(LabelTemplate.name == name)):
+        name, suffix = f"{base} {suffix}", suffix + 1
+    record = LabelTemplate(name=name, width_mm=source.width_mm, height_mm=source.height_mm, layout=json.loads(json.dumps(source.layout)), created_by_id=user.id)
+    db.add(record); db.flush(); audit(db, user, "label_template.duplicated", "label_template", record.id, {"sourceId": str(source.id)}); db.commit()
+    return template_json(record)
+
+
+@app.post("/api/label-templates/{template_id}/default")
+def default_label_template(template_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(admin_user)):
+    record = db.get(LabelTemplate, template_id)
+    if not record or record.archived: raise HTTPException(404, "Label template not found")
+    db.query(LabelTemplate).filter(LabelTemplate.id != record.id).update({LabelTemplate.is_default: False})
+    record.is_default = True; record.updated_at = now_utc()
+    audit(db, user, "label_template.defaulted", "label_template", record.id); db.commit()
+    return template_json(record)
+
+
+@app.post("/api/label-templates/{template_id}/archive")
+def archive_label_template(template_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(admin_user)):
+    record = db.get(LabelTemplate, template_id)
+    if not record: raise HTTPException(404, "Label template not found")
+    if record.builtin: raise HTTPException(409, "Built-in templates cannot be archived")
+    if record.is_default: raise HTTPException(409, "Choose a different default template first")
+    record.archived = True; record.updated_at = now_utc()
+    audit(db, user, "label_template.archived", "label_template", record.id); db.commit()
+    return {"ok": True}
 
 
 @app.get("/api/printers")
@@ -518,18 +745,42 @@ def book_job(job_id: uuid.UUID, data: JobBookInput, db: Session = Depends(get_db
     job = db.scalar(select(PrintJob).where(PrintJob.id == job_id).options(selectinload(PrintJob.usages)).with_for_update())
     if not job or job.status != "MAPPED": raise HTTPException(409, "Confirm the spool mapping first")
     supplied = {item.usage_id: item for item in data.usages}
+    _apply_booking(db, user, job, supplied, data.allow_negative)
+    db.commit()
+    return job_json(job)
+
+
+def _apply_booking(db: Session, user: User, job: PrintJob, supplied: dict, allow_negative: bool) -> None:
     for usage in job.usages:
         if not usage.mapped_spool_id: raise HTTPException(422, "Not every tool has a spool")
         spool = db.get(Spool, usage.mapped_spool_id, with_for_update=True)
         item = supplied.get(str(usage.id))
         weight = grams_to_mg(item.actual_weight_g) if item and item.actual_weight_g is not None else usage.estimated_weight_mg
         length = item.actual_length_m * 1000 if item and item.actual_length_m is not None else (weight_mg_to_length_mm(weight, spool.diameter_mm, spool.density_g_cm3) if item and item.actual_weight_g is not None else usage.estimated_length_mm)
-        if spool.remaining_weight_mg - weight < 0 and not data.allow_negative: raise HTTPException(409, f"{spool.code} would become negative; confirm the inventory discrepancy")
+        if spool.remaining_weight_mg - weight < 0 and not allow_negative: raise HTTPException(409, f"{spool.code} would become negative; confirm the inventory discrepancy")
         usage.actual_weight_mg, usage.actual_length_mm = weight, length
         spool.remaining_weight_mg -= weight; spool.remaining_length_mm -= length
         if spool.remaining_weight_mg < 0 or spool.remaining_length_mm < 0: spool.discrepancy = True
         db.add(InventoryEntry(spool_id=spool.id, kind="PRINT", weight_delta_mg=-weight, length_delta_mm=-length, diameter_mm=spool.diameter_mm, density_g_cm3=spool.density_g_cm3, note=f"{job.code} · {usage.tool_label}", job_id=job.id, actor_id=user.id))
-    job.status = "BOOKED"; job.booked_by_id = user.id; job.booked_at = now_utc(); audit(db, user, "job.booked", "print_job", job.id); db.commit(); return job_json(job)
+    job.status = "BOOKED"; job.booked_by_id = user.id; job.booked_at = now_utc(); audit(db, user, "job.booked", "print_job", job.id)
+
+
+@app.post("/api/jobs/{job_id}/confirm-and-book")
+def confirm_and_book(job_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    job = db.scalar(select(PrintJob).where(PrintJob.id == job_id).options(selectinload(PrintJob.usages)).with_for_update())
+    if not job or job.status != "NEW": raise HTTPException(409, "Quick booking is only available for a new job")
+    if job.parser_warnings: raise HTTPException(409, "Review this job before booking")
+    if not job.usages or any(not usage.suggested_spool_id or not usage.tool_id for usage in job.usages):
+        raise HTTPException(422, "Every used tool needs a valid suggested spool")
+    for usage in job.usages:
+        spool = db.get(Spool, usage.suggested_spool_id)
+        if not spool or spool.archived: raise HTTPException(422, "A suggested spool is no longer available")
+        usage.mapped_spool_id = spool.id
+    audit(db, user, "job.mapped", "print_job", job.id, {"quick": True})
+    _apply_booking(db, user, job, {}, True)
+    audit(db, user, "job.quick_booked", "print_job", job.id)
+    db.commit()
+    return job_json(job)
 
 
 @app.post("/api/jobs/{job_id}/dismiss")
@@ -603,8 +854,10 @@ def catalog_sync(db: Session = Depends(get_db), user: User = Depends(admin_user)
     try:
         snapshot = sync_catalog(db)
     except CatalogSyncError as error:
+        audit(db, user, "catalog.sync_failed", "catalog_snapshot", None, {"error": str(error)[:500]}); db.commit()
         raise HTTPException(502, str(error)) from error
     except Exception as error:
+        audit(db, user, "catalog.sync_failed", "catalog_snapshot", None, {"error": type(error).__name__}); db.commit()
         raise HTTPException(502, "OpenPrintTag synchronization failed. The previous catalog remains active.") from error
     audit(db, user, "catalog.synced", "catalog_snapshot", snapshot.id, {"count": snapshot.material_count}); db.commit(); return {"id": str(snapshot.id), "revision": snapshot.source_revision, "count": snapshot.material_count}
 
@@ -650,7 +903,20 @@ def export_spools(db: Session = Depends(get_db), user: User = Depends(current_us
 
 @app.get("/api/export/backup.json")
 def export_json(db: Session = Depends(get_db), user: User = Depends(admin_user)):
-    payload = {"version": 1, "exportedAt": now_utc().isoformat(), "spools": [spool_json(db, s) for s in db.scalars(select(Spool)).all()], "printers": [printer_json(p) for p in db.scalars(select(Printer).options(selectinload(Printer.tools).selectinload(PrinterTool.loaded_spool))).all()], "jobs": [job_json(j) for j in db.scalars(select(PrintJob).options(selectinload(PrintJob.usages))).all()]}
+    settings_row = inventory_setting(db)
+    payload = {
+        "version": 2,
+        "exportedAt": now_utc().isoformat(),
+        "spools": [spool_json(db, s) for s in db.scalars(select(Spool)).all()],
+        "printers": [printer_json(p) for p in db.scalars(select(Printer).options(selectinload(Printer.tools).selectinload(PrinterTool.loaded_spool))).all()],
+        "jobs": [job_json(j) for j in db.scalars(select(PrintJob).options(selectinload(PrintJob.usages))).all()],
+        "labelTemplates": [template_json(row) for row in db.scalars(select(LabelTemplate)).all()],
+        "inventorySettings": {"reorderThresholdG": mg_to_grams(settings_row.reorder_threshold_mg)},
+        "reorderRules": [
+            {"id": str(row.id), "productKey": row.product_key, "thresholdG": mg_to_grams(row.threshold_mg) if row.threshold_mg is not None else None, "ignored": row.ignored, "productSnapshot": row.product_snapshot}
+            for row in db.scalars(select(ReorderRule)).all()
+        ],
+    }
     return Response(json.dumps(payload, indent=2), media_type="application/json", headers={"Content-Disposition": "attachment; filename=filaflow-export.json"})
 
 

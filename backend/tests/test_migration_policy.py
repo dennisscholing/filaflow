@@ -22,3 +22,14 @@ def test_v020_schema_change_is_additive():
     assert 'op.add_column("printers"' in upgrade
     assert "drop_" not in upgrade
     assert "alter_column" not in upgrade
+
+
+def test_v030_schema_changes_are_additive():
+    source = (BACKEND / "alembic" / "versions" / "0004_v030_ui_labels.py").read_text(encoding="utf-8")
+    upgrade = source.split("def downgrade", 1)[0]
+    assert upgrade.count("op.create_table(") == 3
+    assert '"label_templates"' in upgrade
+    assert '"inventory_settings"' in upgrade
+    assert '"reorder_rules"' in upgrade
+    assert "drop_" not in upgrade
+    assert "alter_column" not in upgrade

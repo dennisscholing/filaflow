@@ -49,10 +49,10 @@ jobs:
       - run: npm run lint
       - run: npm run build:spa
       - run: python -m pip install -r backend/requirements.txt
-      - name: Test representative v0.1.6 upgrade
+      - name: Test representative v0.2.0 upgrade
         run: |
           cd backend
-          python -m alembic upgrade 0002_indx_t1_t8
+          python -m alembic upgrade 0003_printer_location
           cd ..
           python backend/tests/upgrade_fixture.py seed
           cd backend

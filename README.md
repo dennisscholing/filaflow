@@ -14,6 +14,9 @@ FilaFlow never controls, pauses, approves, or blocks a print. The PrusaSlicer ho
 - Regular G-code and binary `.bgcode` through the official libbgcode CLI.
 - OpenPrintTag catalog synchronization plus fully manual materials.
 - Editable spool and printer metadata, offline color-name suggestions, and real 30-day usage in grams and metres.
+- Silent five-second refresh, attention indicators, available-stock reorder suggestions, and per-user unit preferences.
+- Card/table spool views with saved filters, CIEDE2000 color matching, bulk selection, and configurable columns.
+- Guided, server-rendered SVG label templates with protected presets and exact-size browser printing.
 - Admin/operator users, printer-bound API tokens, audit log, CSV/JSON export, daily backups, and verified pre-upgrade backups.
 - Prebuilt `linux/amd64` and `linux/arm64` images for Synology Container Manager.
 
@@ -48,6 +51,14 @@ See [PrusaSlicer hook setup](client/prusa-hook/README.md) for exact Windows exam
 The Compose file follows `latest`, so no version needs to be edited. Synology Container Manager shows when an image update is available. Apply it under **Image → filaflow → Action → Update**, then rebuild and start the project. A running container cannot safely replace itself; fully unattended updates would require Docker-socket access, which FilaFlow deliberately does not use.
 
 Before a schema update, FilaFlow takes a PostgreSQL custom-format dump, validates it with `pg_restore`, writes a SHA-256 checksum, and only then runs the migration. Startup stops safely if the backup mount is missing, the revision is unknown, or migration verification fails. A manual backup before maintenance remains recommended.
+
+For v0.3.0, update manually in Synology as described in the guide. Existing users, spool IDs, ledger entries, jobs, tools, and loadouts are retained; the migration only adds label-template and reorder-setting tables.
+
+## Labels and reorder suggestions
+
+- Open **Settings → Label templates** to duplicate a protected preset, arrange its elements, and set the default.
+- Select spools in the table view and choose **Print** for an exact-size browser print page. Use 100% scale and disable browser headers and footers.
+- **Reorder suggestions** use `Available` stock (`Remaining − Reserved`) and default to 500 g per product group. Administrators can change the global threshold or override/ignore individual groups in Settings.
 
 ## Backups
 

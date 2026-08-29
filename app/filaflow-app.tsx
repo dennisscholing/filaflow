@@ -1,8 +1,8 @@
 'use client';
 
-/* oxlint-disable typescript/no-deprecated -- React form handlers use the framework's FormEvent type. */
+/* oxlint-disable typescript/no-deprecated, next/no-img-element -- React form handlers use FormEvent; authenticated SVG previews are intentionally plain images. */
 
-import { FormEvent, useCallback, useEffect, useId, useMemo, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   Archive,
@@ -12,7 +12,11 @@ import {
   CloudDownload,
   Database,
   Download,
+  Ellipsis,
+  Eye,
+  GripVertical,
   Inbox,
+  LayoutGrid,
   Layers3,
   LogOut,
   Plus,
@@ -20,10 +24,13 @@ import {
   Pencil,
   Printer as PrinterIcon,
   RefreshCw,
+  RotateCcw,
+  Save,
   Scale,
   Search,
   Settings,
   SlidersHorizontal,
+  TableProperties,
   UserPlus,
   Users,
   Warehouse,
@@ -41,7 +48,6 @@ import {
 } from 'recharts';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { Progress } from '@/components/ui/progress';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import {
@@ -56,6 +62,20 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from '@/components/ui/sheet';
 
 type NavKey = 'overview' | 'spools' | 'printers' | 'jobs' | 'settings';
 type User = {
@@ -63,6 +83,7 @@ type User = {
   email: string;
   displayName: string;
   role: string;
+  preferredUnit: 'grams' | 'meters' | 'both';
   active: boolean;
   createdAt: string;
 };
@@ -97,11 +118,14 @@ type Spool = {
   initialLengthM: number;
   remainingLengthM: number;
   reservedLengthM: number;
+  availableLengthM: number;
   remainingPercent: number;
   lowStock: boolean;
   archived: boolean;
   discrepancy: boolean;
-  loadedOn?: { printer: string; printerCode: string; tool: string } | null;
+  loadedOn?: { printerId: string; printer: string; printerCode: string; toolId: string; tool: string } | null;
+  productKey: string;
+  lastWeighedAt: string | null;
 };
 type SpoolFilters = {
   brand: string;
@@ -111,7 +135,18 @@ type SpoolFilters = {
   loadState: string;
   stockState: string;
   printer: string;
+  similarColor: string;
+  deltaE: string;
 };
+type SpoolColumn = 'code' | 'color' | 'brand' | 'filament' | 'material' | 'remaining' | 'reserved' | 'available' | 'location' | 'loadout' | 'status';
+const SPOOL_COLUMNS: Array<{ key: SpoolColumn; label: string }> = [
+  { key: 'code', label: 'Code' }, { key: 'color', label: 'Color' },
+  { key: 'brand', label: 'Brand' }, { key: 'filament', label: 'Filament' },
+  { key: 'material', label: 'Material' }, { key: 'remaining', label: 'Remaining' },
+  { key: 'reserved', label: 'Reserved' }, { key: 'available', label: 'Available' },
+  { key: 'location', label: 'Location' }, { key: 'loadout', label: 'Loadout' },
+  { key: 'status', label: 'Status' },
+];
 const EMPTY_SPOOL_FILTERS: SpoolFilters = {
   brand: '',
   material: '',
@@ -120,6 +155,8 @@ const EMPTY_SPOOL_FILTERS: SpoolFilters = {
   loadState: '',
   stockState: '',
   printer: '',
+  similarColor: '',
+  deltaE: '12',
 };
 type Tool = {
   id: string;
@@ -133,6 +170,8 @@ type Tool = {
     material: string;
     colorHex: string;
     remainingWeightG: number;
+    remainingLengthM: number;
+    materialType: string;
   };
 };
 type Printer = {
@@ -191,10 +230,38 @@ type Dashboard = {
     lowStockSpools: number;
     loadedSpools: number;
     openJobs: number;
+    negativeSpools: number;
   };
   spools: Spool[];
   printers: Printer[];
   jobs: Job[];
+  attention: OperationalStatus;
+  reorder: ReorderPayload;
+};
+type OperationalStatus = {
+  catalog: { ready: boolean; updatedAt: string | null; stale: boolean; failed: boolean };
+  backup: { ready: boolean; updatedAt: string | null; stale: boolean };
+  oldestOpenJobAt: string | null;
+  staleJobs: number;
+  unknownProfiles: number;
+  unweighedSpools: number;
+};
+type ReorderGroup = {
+  productKey: string; brand: string; materialName: string; materialType: string;
+  colorName: string; colorHex: string; diameterMm: number; spoolCount: number;
+  remainingWeightG: number; reservedWeightG: number; availableWeightG: number;
+  remainingLengthM: number; reservedLengthM: number; availableLengthM: number;
+  thresholdG: number; shortageG: number; ignored: boolean; needsOrdering: boolean;
+};
+type ReorderPayload = { defaultThresholdG: number; groups: ReorderGroup[] };
+type ActivityItem = { id: string; action: string; details: Record<string, unknown>; createdAt: string };
+type LabelElement = {
+  id: string; type: string; x: number; y: number; width: number; height: number;
+  font_size: number; visible: boolean; text: string; bold: boolean;
+};
+type LabelTemplate = {
+  id: string; name: string; widthMm: number; heightMm: number; layout: LabelElement[];
+  builtin: boolean; isDefault: boolean; archived: boolean; createdAt: string; updatedAt: string;
 };
 type CatalogItem = {
   id: string;
@@ -259,6 +326,12 @@ const formatLength = (meters: number) =>
   meters >= 1000
     ? `${(meters / 1000).toLocaleString('en-US', { maximumFractionDigits: 2 })} km`
     : `${meters.toLocaleString('en-US', { maximumFractionDigits: 1 })} m`;
+const formatInventory = (weightG: number, lengthM: number, preference: User['preferredUnit'] = 'both') =>
+  preference === 'grams'
+    ? formatWeight(weightG)
+    : preference === 'meters'
+      ? formatLength(lengthM)
+      : `${formatWeight(weightG)} · ${formatLength(lengthM)}`;
 
 export function FilaFlowApp() {
   const [user, setUser] = useState<User | null>(null);
@@ -273,6 +346,11 @@ export function FilaFlowApp() {
   const [spoolTemplate, setSpoolTemplate] = useState<Spool | null>(null);
   const [printerDialog, setPrinterDialog] = useState(false);
   const [selectedJob, setSelectedJob] = useState<Job | null>(null);
+  const [pollFailures, setPollFailures] = useState(0);
+  const [newJobCount, setNewJobCount] = useState(0);
+  const [pollRetry, setPollRetry] = useState(0);
+  const revisionRef = useRef('');
+  const jobIdsRef = useRef<Set<string> | null>(null);
 
   const refresh = useCallback(async () => {
     const [dash, spoolRows, printerRows, jobRows] = await Promise.all([
@@ -285,6 +363,13 @@ export function FilaFlowApp() {
     setSpools(spoolRows);
     setPrinters(printerRows);
     setJobs(jobRows);
+    setSelectedJob((current) => current ? jobRows.find((row) => row.id === current.id) ?? current : null);
+    const nextOpen = new Set(jobRows.filter((job) => ['NEW', 'MAPPED', 'NEEDS_REVIEW'].includes(job.status)).map((job) => job.id));
+    if (jobIdsRef.current) {
+      const additions = [...nextOpen].filter((id) => !jobIdsRef.current?.has(id)).length;
+      if (additions) setNewJobCount((count) => count + additions);
+    }
+    jobIdsRef.current = nextOpen;
   }, []);
   useEffect(() => {
     api<User>('/api/auth/me')
@@ -295,6 +380,41 @@ export function FilaFlowApp() {
       .catch(() => setUser(null))
       .finally(() => setLoading(false));
   }, [refresh]);
+  useEffect(() => {
+    if (!user) return;
+    let stopped = false;
+    async function checkRevision() {
+      if (document.visibilityState === 'hidden') return;
+      try {
+        const headers = new Headers();
+        if (revisionRef.current) headers.set('If-None-Match', `"${revisionRef.current}"`);
+        const response = await fetch('/api/state/revision', { credentials: 'include', headers });
+        if (response.status === 304) { if (!stopped) setPollFailures(0); return; }
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const value = (await response.json()) as { revision: string };
+        if (revisionRef.current && value.revision !== revisionRef.current) await refresh();
+        revisionRef.current = value.revision;
+        if (!stopped) setPollFailures(0);
+      } catch {
+        if (!stopped) setPollFailures((count) => count + 1);
+      }
+    }
+    void checkRevision();
+    const timer = window.setInterval(checkRevision, 5000);
+    const visible = () => { if (document.visibilityState === 'visible') void checkRevision(); };
+    window.addEventListener('focus', visible);
+    document.addEventListener('visibilitychange', visible);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+      window.removeEventListener('focus', visible);
+      document.removeEventListener('visibilitychange', visible);
+    };
+  }, [refresh, user, pollRetry]);
+  useEffect(() => {
+    document.title = newJobCount > 0 ? `(+${newJobCount}) FilaFlow` : 'FilaFlow';
+    return () => { document.title = 'FilaFlow'; };
+  }, [newJobCount]);
   async function login(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError('');
@@ -321,6 +441,15 @@ export function FilaFlowApp() {
       </div>
     );
   if (!user) return <LoginScreen onSubmit={login} error={error} />;
+  if (typeof window !== 'undefined' && window.location.pathname === '/labels/print')
+    return <LabelPrintView spools={spools} />;
+  if (typeof window !== 'undefined' && /^\/spools\/[0-9a-f-]+$/i.test(window.location.pathname))
+    return <DirectSpoolView spoolId={window.location.pathname.split('/').at(-1) ?? ''} preference={user.preferredUnit} />;
+
+  function navigate(key: NavKey) {
+    setActive(key);
+    if (key === 'jobs') setNewJobCount(0);
+  }
 
   const openJobs = jobs.filter((job) =>
     ['NEW', 'MAPPED', 'NEEDS_REVIEW'].includes(job.status),
@@ -341,7 +470,7 @@ export function FilaFlowApp() {
             {nav.map(([key, label, Icon]) => (
               <button
                 key={key}
-                onClick={() => setActive(key)}
+                onClick={() => navigate(key)}
                 className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition ${active === key ? 'bg-primary text-primary-foreground shadow-sm' : 'text-sidebar-foreground hover:bg-sidebar-accent'}`}
               >
                 <Icon className="size-4" />
@@ -362,6 +491,11 @@ export function FilaFlowApp() {
               {nav.find(([key]) => key === active)?.[1]}
             </h1>
             <div className="flex items-center gap-2">
+              {pollFailures >= 3 && (
+                <Button size="sm" variant="outline" onClick={() => { setPollFailures(0); setPollRetry((value) => value + 1); }}>
+                  <RefreshCw className="size-3.5" /> Updates paused · Retry
+                </Button>
+              )}
               {active === 'spools' && (
                 <Button
                   className="rounded-xl"
@@ -384,13 +518,17 @@ export function FilaFlowApp() {
             {active === 'overview' && dashboard && (
               <Overview
                 dashboard={dashboard}
-                onNavigate={setActive}
+                preference={user.preferredUnit}
+                onNavigate={navigate}
                 onJob={setSelectedJob}
+                onAddSpool={() => { setSpoolTemplate(null); setSpoolDialog(true); }}
+                onAddPrinter={() => setPrinterDialog(true)}
               />
             )}
             {active === 'spools' && (
               <SpoolsView
                 spools={spools}
+                preference={user.preferredUnit}
                 onRefresh={refresh}
                 onAdd={() => { setSpoolTemplate(null); setSpoolDialog(true); }}
                 onDuplicate={(spool) => { setSpoolTemplate(spool); setSpoolDialog(true); }}
@@ -400,6 +538,7 @@ export function FilaFlowApp() {
               <PrintersView
                 printers={printers}
                 spools={spools}
+                preference={user.preferredUnit}
                 onRefresh={refresh}
               />
             )}
@@ -410,6 +549,8 @@ export function FilaFlowApp() {
               <SettingsView
                 user={user}
                 printers={printers}
+                spools={spools}
+                onUserUpdated={setUser}
                 onLogout={async () => {
                   await api('/api/auth/logout', { method: 'POST' });
                   location.reload();
@@ -423,11 +564,12 @@ export function FilaFlowApp() {
         {nav.map(([key, label, Icon]) => (
           <button
             key={key}
-            onClick={() => setActive(key)}
+            onClick={() => navigate(key)}
             className={`flex min-w-12 flex-col items-center gap-1 rounded-lg px-2 py-1 text-[10px] ${active === key ? 'text-primary' : 'text-muted-foreground'}`}
           >
             <Icon className="size-4" />
             {label}
+            {key === 'jobs' && openJobs.length > 0 && <span className="absolute ml-5 -mt-5 rounded-full bg-orange-500 px-1.5 text-[9px] text-white">{openJobs.length}</span>}
           </button>
         ))}
       </nav>
@@ -444,7 +586,7 @@ export function FilaFlowApp() {
       />
       {selectedJob && (
         <JobDialog
-          key={selectedJob.id}
+          key={`${selectedJob.id}:${selectedJob.status}:${selectedJob.printer.id}:${selectedJob.warnings.join('|')}:${selectedJob.usages.map((usage) => `${usage.id}-${usage.mappedSpoolId ?? usage.suggestedSpoolId ?? ''}`).join('|')}`}
           job={selectedJob}
           spools={spools}
           printers={printers}
@@ -536,31 +678,37 @@ function CatalogStatus() {
 
 function Overview({
   dashboard,
+  preference,
   onNavigate,
   onJob,
+  onAddSpool,
+  onAddPrinter,
 }: {
   dashboard: Dashboard;
+  preference: User['preferredUnit'];
   onNavigate: (key: NavKey) => void;
   onJob: (job: Job) => void;
+  onAddSpool: () => void;
+  onAddPrinter: () => void;
 }) {
   const s = dashboard.summary;
   const metrics = [
     {
       label: 'Remaining',
-      value: formatWeight(s.remainingWeightG),
-      note: formatLength(s.remainingLengthM),
+      value: formatInventory(s.remainingWeightG, s.remainingLengthM, preference),
+      note: `${s.activeSpools} active spools`,
       icon: Warehouse,
     },
     {
       label: 'Reserved',
-      value: formatWeight(s.reservedWeightG),
-      note: formatLength(s.reservedLengthM),
+      value: formatInventory(s.reservedWeightG, s.reservedLengthM, preference),
+      note: `${s.openJobs} open jobs`,
       icon: Layers3,
     },
     {
       label: 'Available',
-      value: formatWeight(s.availableWeightG),
-      note: formatLength(s.availableLengthM),
+      value: formatInventory(s.availableWeightG, s.availableLengthM, preference),
+      note: `${s.negativeSpools} negative`,
       icon: CircleGauge,
     },
     {
@@ -572,6 +720,13 @@ function Overview({
   ];
   return (
     <div className="space-y-7">
+      <section className="flex flex-wrap items-center gap-2 rounded-2xl border bg-card p-3 shadow-sm">
+        <span className="mr-2 text-sm font-semibold">Quick actions</span>
+        <Button size="sm" onClick={onAddSpool}><Plus className="size-4" /> Add spool</Button>
+        <Button size="sm" variant="outline" onClick={() => onNavigate('spools')}><Scale className="size-4" /> Weigh spool</Button>
+        <Button size="sm" variant="outline" onClick={onAddPrinter}><PrinterIcon className="size-4" /> Add printer</Button>
+        <Button size="sm" variant="outline" onClick={() => onNavigate('jobs')}><Inbox className="size-4" /> Process job</Button>
+      </section>
       <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         {metrics.map(({ label, value, note, icon: Icon }) => (
           <article
@@ -591,6 +746,10 @@ function Overview({
           </article>
         ))}
       </section>
+      <div className="grid gap-6 xl:grid-cols-2">
+        <AttentionPanel status={dashboard.attention} summary={dashboard.summary} onNavigate={onNavigate} />
+        <ReorderPanel reorder={dashboard.reorder} onNavigate={onNavigate} />
+      </div>
       <div className="grid gap-6 xl:grid-cols-[1.35fr_.65fr]">
         <section className="rounded-2xl border bg-card shadow-sm">
           <PanelHeader
@@ -602,7 +761,7 @@ function Overview({
             {dashboard.spools.length ? (
               dashboard.spools
                 .slice(0, 3)
-                .map((spool) => <SpoolCard key={spool.id} spool={spool} />)
+                .map((spool) => <SpoolCard key={spool.id} spool={spool} preference={preference} />)
             ) : (
               <Empty text="No spools yet." />
             )}
@@ -663,9 +822,51 @@ function Overview({
     </div>
   );
 }
-function SpoolCard({ spool }: { spool: Spool }) {
+
+function AttentionPanel({ status, summary, onNavigate }: { status: OperationalStatus; summary: Dashboard['summary']; onNavigate: (key: NavKey) => void }) {
+  const rows = [
+    { label: 'Low-stock spools', value: summary.lowStockSpools, target: 'spools' as NavKey },
+    { label: 'Negative inventory', value: summary.negativeSpools, target: 'spools' as NavKey },
+    { label: 'Jobs older than 7 days', value: status.staleJobs, target: 'jobs' as NavKey },
+    { label: 'Unknown slicer profiles', value: status.unknownProfiles, target: 'jobs' as NavKey },
+    { label: 'Not weighed in 90 days', value: status.unweighedSpools, target: 'spools' as NavKey },
+    { label: status.catalog.failed ? 'Catalog synchronization failed' : 'Catalog needs attention', value: status.catalog.stale || status.catalog.failed ? 1 : 0, target: 'settings' as NavKey },
+    { label: 'Backup needs attention', value: status.backup.stale ? 1 : 0, target: 'settings' as NavKey },
+  ].filter((row) => row.value > 0);
   return (
-    <article className="rounded-2xl border bg-background p-4">
+    <section className="rounded-2xl border bg-card shadow-sm">
+      <PanelHeader title="Needs attention" action={`${rows.length} items`} onClick={() => onNavigate(rows[0]?.target ?? 'overview')} />
+      <div className="divide-y">
+        {rows.length ? rows.slice(0, 6).map((row) => (
+          <button key={row.label} onClick={() => onNavigate(row.target)} className="flex w-full items-center justify-between px-5 py-3 text-left hover:bg-muted/60">
+            <span className="flex items-center gap-2 text-sm"><AlertTriangle className="size-4 text-orange-500" />{row.label}</span>
+            <Badge variant="secondary">{row.value}</Badge>
+          </button>
+        )) : <Empty text="Everything looks current." />}
+      </div>
+    </section>
+  );
+}
+
+function ReorderPanel({ reorder, onNavigate }: { reorder: ReorderPayload; onNavigate: (key: NavKey) => void }) {
+  return (
+    <section className="rounded-2xl border bg-card shadow-sm">
+      <PanelHeader title="Reorder suggestions" action={`${reorder.groups.length} products`} onClick={() => onNavigate('spools')} />
+      <div className="divide-y">
+        {reorder.groups.length ? reorder.groups.slice(0, 5).map((group) => (
+          <div key={group.productKey} className="flex items-center gap-3 px-5 py-3">
+            <span className="size-8 shrink-0 rounded-lg border" style={{ background: group.colorHex }} />
+            <div className="min-w-0 flex-1"><p className="truncate text-sm font-semibold">{group.brand} · {group.materialName}</p><p className="text-xs text-muted-foreground">{group.spoolCount} spools · {formatWeight(group.availableWeightG)} available</p></div>
+            <Badge variant="outline">-{formatWeight(group.shortageG)}</Badge>
+          </div>
+        )) : <Empty text={`All products are above ${formatWeight(reorder.defaultThresholdG)}.`} />}
+      </div>
+    </section>
+  );
+}
+function SpoolCard({ spool, preference = 'both', onOpen }: { spool: Spool; preference?: User['preferredUnit']; onOpen?: () => void }) {
+  return (
+    <button type="button" disabled={!onOpen} className="w-full rounded-2xl border bg-background p-4 text-left disabled:cursor-default disabled:opacity-100" onClick={onOpen}>
       <div className="flex items-start justify-between">
         <div className="flex items-center gap-3">
           <span
@@ -687,8 +888,7 @@ function SpoolCard({ spool }: { spool: Spool }) {
         <div>
           <p className="text-2xl font-bold">{spool.remainingPercent}%</p>
           <p className="text-xs text-muted-foreground">
-            {formatWeight(spool.remainingWeightG)} ·{' '}
-            {formatLength(spool.remainingLengthM)}
+            {formatInventory(spool.remainingWeightG, spool.remainingLengthM, preference)}
           </p>
         </div>
         <span
@@ -697,16 +897,21 @@ function SpoolCard({ spool }: { spool: Spool }) {
           {spool.archived ? 'Inactive' : spool.lowStock ? 'Low' : 'Available'}
         </span>
       </div>
-      <Progress
-        value={Math.max(0, spool.remainingPercent)}
-        className="mt-3 h-1.5"
-      />
+      <div className="mt-3 grid grid-cols-3 gap-1 text-[10px]">
+        <div><p className="text-muted-foreground">Remaining</p><p className="truncate font-semibold">{formatInventory(spool.remainingWeightG, spool.remainingLengthM, preference)}</p></div>
+        <div><p className="text-muted-foreground">Reserved</p><p className="truncate font-semibold">{formatInventory(spool.reservedWeightG, spool.reservedLengthM, preference)}</p></div>
+        <div><p className="text-muted-foreground">Available</p><p className="truncate font-semibold">{formatInventory(spool.availableWeightG, spool.availableLengthM, preference)}</p></div>
+      </div>
+      <div className="mt-3 flex h-1.5 overflow-hidden rounded-full bg-muted" aria-label={`${spool.remainingPercent}% remaining`}>
+        <span className="h-full bg-emerald-500" style={{ width: `${Math.max(0, Math.min(100, spool.initialWeightG ? spool.availableWeightG / spool.initialWeightG * 100 : 0))}%` }} />
+        <span className="h-full bg-orange-500" style={{ width: `${Math.max(0, Math.min(100, spool.initialWeightG ? spool.reservedWeightG / spool.initialWeightG * 100 : 0))}%` }} />
+      </div>
       {spool.loadedOn && (
         <p className="mt-3 truncate text-[11px] text-muted-foreground">
           Loaded: {spool.loadedOn.printerCode} · {spool.loadedOn.tool}
         </p>
       )}
-    </article>
+    </button>
   );
 }
 function PrinterPanel({
@@ -739,7 +944,7 @@ function PrinterPanel({
                   {printer.tools.length} tools
                 </Badge>
               </div>
-              <div className="mt-5 grid grid-cols-4 gap-2">
+              <div className="mt-5 grid grid-cols-2 gap-2 sm:grid-cols-4 xl:grid-cols-8">
                 {printer.tools.map((tool) => (
                   <div
                     key={tool.id}
@@ -792,7 +997,7 @@ function TrendPanel() {
         <Badge variant="secondary">30 days</Badge>
       </div>
       <div className="mt-5 h-64 w-full">
-        <ResponsiveContainer width="100%" height="100%">
+        <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={256}>
           <LineChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
             <CartesianGrid strokeDasharray="3 3" opacity={0.2} />
             <XAxis dataKey="label" minTickGap={28} tick={{ fontSize: 11 }} />
@@ -837,11 +1042,13 @@ function Empty({ text }: { text: string }) {
 
 function SpoolsView({
   spools,
+  preference,
   onRefresh,
   onAdd,
   onDuplicate,
 }: {
   spools: Spool[];
+  preference: User['preferredUnit'];
   onRefresh: () => Promise<void>;
   onAdd: () => void;
   onDuplicate: (spool: Spool) => void;
@@ -855,6 +1062,20 @@ function SpoolsView({
   const [showArchived, setShowArchived] = useState(false);
   const [loadingArchived, setLoadingArchived] = useState(false);
   const [listError, setListError] = useState('');
+  const [view, setView] = useState<'cards' | 'table'>(() => (typeof window !== 'undefined' && localStorage.getItem('filaflow.spoolView') === 'table' ? 'table' : 'cards'));
+  const [selectedSpool, setSelectedSpool] = useState<Spool | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [tableSort, setTableSort] = useState<{ key: SpoolColumn; direction: 'asc' | 'desc' }>({ key: 'code', direction: 'asc' });
+  const [similarIds, setSimilarIds] = useState<Set<string> | null>(null);
+  const [columns, setColumns] = useState<Set<SpoolColumn>>(() => {
+    try {
+      const saved = typeof window === 'undefined' ? null : JSON.parse(localStorage.getItem('filaflow.spoolColumns') || 'null') as SpoolColumn[] | null;
+      return new Set(saved?.length ? saved : SPOOL_COLUMNS.map((column) => column.key));
+    } catch { return new Set(SPOOL_COLUMNS.map((column) => column.key)); }
+  });
+  const [savedFilters, setSavedFilters] = useState<Record<string, SpoolFilters>>(() => {
+    try { return typeof window === 'undefined' ? {} : JSON.parse(localStorage.getItem('filaflow.savedFilters') || '{}') as Record<string, SpoolFilters>; } catch { return {}; }
+  });
   const visibleSpools = showArchived ? archivedSpools : spools;
   const filterOptions = useMemo(() => {
     const unique = (values: string[]) =>
@@ -885,12 +1106,20 @@ function SpoolsView({
       ),
     };
   }, [visibleSpools]);
+  useEffect(() => {
+    if (!filters.similarColor) return;
+    const timer = setTimeout(() => {
+      api<Spool[]>(`/api/spools?colorHex=${encodeURIComponent(filters.similarColor)}&deltaE=${encodeURIComponent(filters.deltaE)}&archived=${showArchived}`)
+        .then((rows) => setSimilarIds(new Set(rows.map((row) => row.id))))
+        .catch(() => setSimilarIds(new Set()));
+    }, 180);
+    return () => clearTimeout(timer);
+  }, [filters.deltaE, filters.similarColor, showArchived]);
   const filtered = useMemo(
     () =>
       visibleSpools.filter((spool) => {
-        const matchesQuery = `${spool.code} ${spool.brand} ${spool.materialName} ${spool.materialType} ${spool.colorName} ${spool.colorHex} ${spool.location} ${spool.loadedOn?.printer ?? ''} ${spool.loadedOn?.printerCode ?? ''}`
-          .toLowerCase()
-          .includes(query.trim().toLowerCase());
+        const haystack = `${spool.code} ${spool.brand} ${spool.materialName} ${spool.materialType} ${spool.colorName} ${spool.colorHex} ${spool.location} ${spool.lotNumber} ${spool.serialNumber} ${spool.loadedOn?.printer ?? ''} ${spool.loadedOn?.printerCode ?? ''}`.toLowerCase();
+        const matchesQuery = query.trim().toLowerCase().split(/\s+/).filter(Boolean).every((token) => haystack.includes(token));
         return (
           matchesQuery &&
           (!filters.brand || spool.brand === filters.brand) &&
@@ -905,17 +1134,54 @@ function SpoolsView({
           (!filters.stockState ||
             (filters.stockState === 'low' ? spool.lowStock : !spool.lowStock)) &&
           (!filters.printer || spool.loadedOn?.printerCode === filters.printer)
+          && (!similarIds || similarIds.has(spool.id))
         );
       }),
-    [visibleSpools, query, filters],
+    [visibleSpools, query, filters, similarIds],
   );
-  const activeFilterCount = Object.values(filters).filter(Boolean).length;
+  const activeFilterCount = Object.entries(filters).filter(([key, value]) => key !== 'deltaE' && Boolean(value)).length;
+  const tableRows = useMemo(() => {
+    const value = (spool: Spool) => {
+      const values: Record<SpoolColumn, string | number> = {
+        code: spool.code, color: spool.colorName, brand: spool.brand, filament: spool.materialName,
+        material: spool.materialType, remaining: spool.remainingWeightG, reserved: spool.reservedWeightG,
+        available: spool.availableWeightG, location: spool.location, loadout: spool.loadedOn ? `${spool.loadedOn.printerCode} ${spool.loadedOn.tool}` : '', status: spool.archived ? 'archived' : spool.lowStock ? 'low' : 'available',
+      };
+      return values[tableSort.key];
+    };
+    return [...filtered].sort((left, right) => {
+      const a = value(left); const b = value(right);
+      const result = typeof a === 'number' && typeof b === 'number' ? a - b : String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: 'base' });
+      return tableSort.direction === 'asc' ? result : -result;
+    });
+  }, [filtered, tableSort]);
+  function sortTable(key: SpoolColumn) { setTableSort((current) => ({ key, direction: current.key === key && current.direction === 'asc' ? 'desc' : 'asc' })); }
   function updateFilter(key: keyof SpoolFilters, value: string) {
+    if (key === 'similarColor' && !value) setSimilarIds(null);
     setFilters((current) => ({ ...current, [key]: value }));
   }
   function clearFilters() {
     setQuery('');
     setFilters({ ...EMPTY_SPOOL_FILTERS });
+  }
+  function changeView(next: 'cards' | 'table') { setView(next); localStorage.setItem('filaflow.spoolView', next); }
+  function toggleColumn(key: SpoolColumn) {
+    setColumns((current) => {
+      const next = new Set(current);
+      if (next.has(key) && next.size > 1) next.delete(key); else next.add(key);
+      localStorage.setItem('filaflow.spoolColumns', JSON.stringify([...next]));
+      return next;
+    });
+  }
+  function saveFilter() {
+    const name = prompt('Name this filter');
+    if (!name?.trim()) return;
+    const next = { ...savedFilters, [name.trim()]: filters };
+    setSavedFilters(next); localStorage.setItem('filaflow.savedFilters', JSON.stringify(next));
+  }
+  function printSelected() {
+    if (!selectedIds.size) return;
+    window.open(`/labels/print?spools=${encodeURIComponent([...selectedIds].join(','))}`, '_blank');
   }
   async function toggleArchived() {
     if (!showArchived) {
@@ -966,6 +1232,12 @@ function SpoolsView({
               <Archive className="size-4" />
               {showArchived ? 'Show active' : 'Archived'}
             </Button>
+            <div className="flex rounded-lg border p-0.5">
+              <Button aria-label="Card view" size="icon-sm" variant={view === 'cards' ? 'secondary' : 'ghost'} onClick={() => changeView('cards')}><LayoutGrid className="size-4" /></Button>
+              <Button aria-label="Table view" size="icon-sm" variant={view === 'table' ? 'secondary' : 'ghost'} onClick={() => changeView('table')}><TableProperties className="size-4" /></Button>
+            </div>
+            {view === 'table' && <DropdownMenu><DropdownMenuTrigger render={<Button size="sm" variant="outline" />}><SlidersHorizontal className="size-4" /> Columns</DropdownMenuTrigger><DropdownMenuContent align="end" className="w-48">{SPOOL_COLUMNS.map((column) => <DropdownMenuCheckboxItem key={column.key} checked={columns.has(column.key)} onCheckedChange={() => toggleColumn(column.key)}>{column.label}</DropdownMenuCheckboxItem>)}</DropdownMenuContent></DropdownMenu>}
+            {selectedIds.size > 0 && <Button size="sm" onClick={printSelected}><Download className="size-4" /> Print {selectedIds.size}</Button>}
           </div>
         </div>
         <div className="mt-3 border-t pt-3">
@@ -1079,23 +1351,23 @@ function SpoolsView({
               ))}
             </NativeSelect>
           </div>
+          <div className="mt-3 flex flex-wrap items-end gap-2">
+            <div className="space-y-1"><Label htmlFor="similar-color" className="text-[11px]">Similar to color</Label><Input id="similar-color" type="color" className="h-9 w-14 p-1" value={filters.similarColor || '#808080'} onChange={(event) => updateFilter('similarColor', event.target.value)} /></div>
+            {filters.similarColor && <><div className="space-y-1"><Label htmlFor="color-distance" className="text-[11px]">Color distance</Label><Input id="color-distance" className="h-9 w-20" type="number" min="2" max="30" value={filters.deltaE} onChange={(event) => updateFilter('deltaE', event.target.value)} /></div><Button size="sm" variant="ghost" onClick={() => updateFilter('similarColor', '')}>Disable color match</Button></>}
+            <Button size="sm" variant="outline" onClick={saveFilter}><Save className="size-3.5" /> Save filter</Button>
+            {Object.entries(savedFilters).map(([name, saved]) => <Button key={name} size="sm" variant="ghost" onClick={() => setFilters(saved)}>{name}</Button>)}
+          </div>
         </div>
       </div>
       {listError && <p className="text-sm text-destructive">{listError}</p>}
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      {view === 'cards' ? <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         {filtered.map((spool) => (
           <article
             key={spool.id}
             className="rounded-2xl border bg-card p-1 shadow-sm"
           >
-            <SpoolCard spool={spool} />
-            <div className="flex flex-wrap gap-2 p-3 pt-0">
-              <Button variant="outline" size="sm" onClick={() => setEditingSpool(spool)}>
-                <Pencil className="size-4" /> Edit
-              </Button>
-              <Button variant="ghost" size="sm" onClick={() => onDuplicate(spool)}>
-                <Copy className="size-4" /> Duplicate
-              </Button>
+            <SpoolCard spool={spool} preference={preference} onOpen={() => setSelectedSpool(spool)} />
+            <div className="flex items-center gap-2 p-3 pt-0">
               {!spool.archived && (
                 <Button
                   variant="outline"
@@ -1105,30 +1377,28 @@ function SpoolsView({
                   <Scale className="size-4" /> Weigh
                 </Button>
               )}
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() =>
-                  window.open(`/api/spools/${spool.id}/label.svg`, '_blank')
-                }
-              >
-                <Download className="size-4" /> Label
-              </Button>
-              {!spool.archived && (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="text-destructive hover:text-destructive"
-                  onClick={() => setEmptySpool(spool)}
-                >
-                  <Archive className="size-4" /> Empty
-                </Button>
-              )}
+              <DropdownMenu><DropdownMenuTrigger render={<Button aria-label={`Actions for ${spool.code}`} variant="ghost" size="icon-sm" className="ml-auto" />}><Ellipsis className="size-4" /></DropdownMenuTrigger><DropdownMenuContent align="end">
+                <DropdownMenuItem onClick={() => setEditingSpool(spool)}><Pencil className="size-4" /> Edit</DropdownMenuItem>
+                <DropdownMenuItem onClick={() => onDuplicate(spool)}><Copy className="size-4" /> Duplicate</DropdownMenuItem>
+                <DropdownMenuItem onClick={() => window.open(`/labels/print?spools=${spool.id}`, '_blank')}><Download className="size-4" /> Label</DropdownMenuItem>
+                {!spool.archived && <DropdownMenuItem className="text-destructive" onClick={() => setEmptySpool(spool)}><Archive className="size-4" /> Empty</DropdownMenuItem>}
+              </DropdownMenuContent></DropdownMenu>
             </div>
           </article>
         ))}
         {!filtered.length && <Empty text="No spools found." />}
-      </div>
+      </div> : <div className="overflow-x-auto rounded-2xl border bg-card shadow-sm">
+        <table className="w-full min-w-[980px] text-sm"><thead className="border-b bg-muted/40 text-left text-xs text-muted-foreground"><tr>
+          <th className="p-3"><input aria-label="Select all shown spools" type="checkbox" checked={tableRows.length > 0 && tableRows.every((row) => selectedIds.has(row.id))} onChange={(event) => setSelectedIds(event.target.checked ? new Set(tableRows.map((row) => row.id)) : new Set())} /></th>
+          {SPOOL_COLUMNS.filter((column) => columns.has(column.key)).map((column) => <th key={column.key} className="p-3 font-semibold"><button type="button" onClick={() => sortTable(column.key)} className="inline-flex items-center gap-1 hover:text-foreground">{column.label}{tableSort.key === column.key ? (tableSort.direction === 'asc' ? ' ↑' : ' ↓') : ''}</button></th>)}
+        </tr></thead><tbody className="divide-y">{tableRows.map((spool) => <tr key={spool.id} className="hover:bg-muted/40">
+          <td className="p-3" onClick={(event) => event.stopPropagation()}><input aria-label={`Select ${spool.code}`} type="checkbox" checked={selectedIds.has(spool.id)} onChange={(event) => setSelectedIds((current) => { const next = new Set(current); if (event.target.checked) next.add(spool.id); else next.delete(spool.id); return next; })} /></td>
+          {columns.has('code') && <td className="p-3 font-mono font-semibold"><button onClick={() => setSelectedSpool(spool)} className="underline-offset-2 hover:underline">{spool.code}</button></td>}{columns.has('color') && <td className="p-3"><span aria-label={spool.colorName} className="block size-6 rounded-md border" style={{ background: spool.colorHex }} /></td>}
+          {columns.has('brand') && <td className="p-3 font-semibold">{spool.brand}</td>}{columns.has('filament') && <td className="p-3">{spool.materialName}</td>}{columns.has('material') && <td className="p-3">{spool.materialType}</td>}
+          {columns.has('remaining') && <td className="p-3">{formatInventory(spool.remainingWeightG, spool.remainingLengthM, preference)}</td>}{columns.has('reserved') && <td className="p-3">{formatInventory(spool.reservedWeightG, spool.reservedLengthM, preference)}</td>}{columns.has('available') && <td className="p-3 font-semibold">{formatInventory(spool.availableWeightG, spool.availableLengthM, preference)}</td>}
+          {columns.has('location') && <td className="p-3">{spool.location || '—'}</td>}{columns.has('loadout') && <td className="p-3">{spool.loadedOn ? `${spool.loadedOn.printerCode} · ${spool.loadedOn.tool}` : 'Unloaded'}</td>}{columns.has('status') && <td className="p-3">{spool.lowStock ? <Badge variant="outline">Low</Badge> : <Badge variant="secondary">Available</Badge>}</td>}
+        </tr>)}</tbody></table>{!filtered.length && <Empty text="No spools found." />}
+      </div>}
       <Button
         onClick={onAdd}
         className="fixed bottom-20 right-5 rounded-full shadow-lg lg:hidden"
@@ -1161,28 +1431,74 @@ function SpoolsView({
         onOpenChange={(open) => !open && setEditingSpool(null)}
         onUpdated={async () => { setEditingSpool(null); await onRefresh(); }}
       />
+      <SpoolDetailSheet spool={selectedSpool} open={!!selectedSpool} onOpenChange={(open) => !open && setSelectedSpool(null)} preference={preference} />
     </div>
   );
+}
+function SpoolDetailSheet({ spool, open, onOpenChange, preference }: { spool: Spool | null; open: boolean; onOpenChange: (open: boolean) => void; preference: User['preferredUnit'] }) {
+  const [detail, setDetail] = useState<(Spool & { ledger: Array<{ id: string; kind: string; weightDeltaG: number; lengthDeltaM: number; note: string; createdAt: string }> }) | null>(null);
+  const [activity, setActivity] = useState<ActivityItem[]>([]);
+  useEffect(() => {
+    if (!spool || !open) return;
+    Promise.all([
+      api<Spool & { ledger: Array<{ id: string; kind: string; weightDeltaG: number; lengthDeltaM: number; note: string; createdAt: string }> }>(`/api/spools/${spool.id}`),
+      api<ActivityItem[]>(`/api/activity?entity_type=spool&entity_id=${spool.id}`),
+    ]).then(([row, events]) => { setDetail(row); setActivity(events); }).catch(() => undefined);
+  }, [open, spool]);
+  const row = detail ?? spool;
+  return <Sheet open={open} onOpenChange={onOpenChange}><SheetContent className="w-full overflow-y-auto sm:max-w-xl">
+    <SheetHeader><SheetTitle>{row?.code} · {row?.brand}</SheetTitle><SheetDescription>{row?.materialName} · {row?.materialType}</SheetDescription></SheetHeader>
+    {row && <div className="space-y-5 px-4 pb-6">
+      <div className="flex items-center gap-4 rounded-2xl border p-4"><span className="size-14 rounded-2xl border" style={{ background: row.colorHex }} /><div><p className="font-semibold">{row.colorName}</p><p className="font-mono text-xs text-muted-foreground">{row.colorHex}</p></div></div>
+      <div className="grid grid-cols-3 gap-2">{[
+        ['Remaining', formatInventory(row.remainingWeightG, row.remainingLengthM, preference)],
+        ['Reserved', formatInventory(row.reservedWeightG, row.reservedLengthM, preference)],
+        ['Available', formatInventory(row.availableWeightG, row.availableLengthM, preference)],
+      ].map(([label, value]) => <div key={label} className="rounded-xl bg-muted p-3"><p className="text-[11px] text-muted-foreground">{label}</p><p className="mt-1 text-sm font-bold">{value}</p></div>)}</div>
+      <div className="grid grid-cols-2 gap-3 text-sm"><div><p className="text-xs text-muted-foreground">Location</p><p>{row.location || '—'}</p></div><div><p className="text-xs text-muted-foreground">Loaded on</p><p>{row.loadedOn ? `${row.loadedOn.printerCode} · ${row.loadedOn.tool}` : 'Unloaded'}</p></div><div><p className="text-xs text-muted-foreground">Diameter / density</p><p>{row.diameterMm} mm · {row.density} g/cm³</p></div><div><p className="text-xs text-muted-foreground">Spool tare</p><p>{formatWeight(row.tareWeightG)}</p></div></div>
+      {detail && <section><h3 className="font-semibold">Inventory ledger</h3><div className="mt-2 divide-y rounded-xl border">{detail.ledger.slice(0, 20).map((entry) => <div key={entry.id} className="flex justify-between gap-3 p-3"><div><p className="text-sm font-medium">{entry.kind}</p><p className="text-xs text-muted-foreground">{entry.note} · {new Date(entry.createdAt).toLocaleString()}</p></div><p className="whitespace-nowrap text-xs font-semibold">{formatWeight(entry.weightDeltaG)} · {formatLength(entry.lengthDeltaM)}</p></div>)}</div></section>}
+      <section><h3 className="font-semibold">Activity</h3><div className="mt-2 space-y-2">{activity.slice(0, 12).map((event) => <div key={event.id} className="rounded-xl bg-muted/60 p-3"><p className="text-sm font-medium">{event.action.replaceAll('.', ' ')}</p><p className="text-xs text-muted-foreground">{new Date(event.createdAt).toLocaleString()}</p></div>)}</div></section>
+    </div>}
+  </SheetContent></Sheet>;
 }
 function PrintersView({
   printers,
   spools,
+  preference,
   onRefresh,
 }: {
   printers: Printer[];
   spools: Spool[];
+  preference: User['preferredUnit'];
   onRefresh: () => Promise<void>;
 }) {
   const [editingPrinter, setEditingPrinter] = useState<Printer | null>(null);
+  const [optimistic, setOptimistic] = useState<Record<string, string>>({});
+  const [error, setError] = useState('');
   async function load(printerId: string, toolId: string, spoolId: string) {
-    await api(`/api/printers/${printerId}/tools/${toolId}/loadout`, {
-      method: 'PUT',
-      body: JSON.stringify({ spool_id: spoolId || null }),
-    });
-    await onRefresh();
+    const snapshot = { ...optimistic };
+    const sourceToolId = spools.find((spool) => spool.id === spoolId)?.loadedOn?.toolId;
+    setOptimistic((current) => {
+      const next = { ...current, [toolId]: spoolId };
+      if (sourceToolId && sourceToolId !== toolId) next[sourceToolId] = '';
+      return next;
+    }); setError('');
+    try {
+      await api(`/api/printers/${printerId}/tools/${toolId}/loadout`, { method: 'PUT', body: JSON.stringify({ spool_id: spoolId || null }) });
+      await onRefresh();
+      setOptimistic((current) => { const next = { ...current }; delete next[toolId]; if (sourceToolId) delete next[sourceToolId]; return next; });
+    } catch (reason) {
+      setOptimistic(snapshot);
+      setError(reason instanceof Error ? reason.message : 'Loadout update failed');
+    }
   }
+  const orderedFor = (currentId: string | null) => [...spools].sort((left, right) => {
+    const rank = (row: Spool) => row.id === currentId ? 0 : row.loadedOn ? 2 : 1;
+    return rank(left) - rank(right) || right.availableWeightG - left.availableWeightG;
+  });
   return (
-    <div className="grid gap-5 xl:grid-cols-2">
+    <div className="space-y-5">
+      {error && <p className="rounded-xl bg-destructive/10 p-3 text-sm text-destructive">{error}</p>}
       {printers.map((printer) => (
         <article
           key={printer.id}
@@ -1205,34 +1521,43 @@ function PrintersView({
               <Badge>{printer.tools.length} tools</Badge>
             </div>
           </div>
-          <div className="space-y-2 p-4">
+          <div className={`grid gap-3 p-4 ${printer.tools.length >= 8 ? 'grid-cols-2 sm:grid-cols-4 xl:grid-cols-8' : 'sm:grid-cols-2'}`}>
             {printer.tools.map((tool) => (
               <div
                 key={tool.id}
-                className="grid grid-cols-[52px_1fr] items-center gap-3 rounded-xl bg-muted/60 p-3"
+                onDragOver={(event) => event.preventDefault()}
+                onDrop={(event) => { event.preventDefault(); const spoolId = event.dataTransfer.getData('application/x-filaflow-spool'); if (spoolId) void load(printer.id, tool.id, spoolId); }}
+                className="rounded-2xl border bg-muted/40 p-3 transition hover:border-primary/50"
               >
-                <div className="text-center">
+                {(() => { const selectedId = Object.prototype.hasOwnProperty.call(optimistic, tool.id) ? optimistic[tool.id] : tool.loadedSpool?.id || ''; const selected = spools.find((row) => row.id === selectedId); return <>
+                <div className="flex items-center justify-between">
+                  <Badge variant="secondary" className="font-mono">{tool.label}</Badge><GripVertical className="size-4 text-muted-foreground" />
+                </div>
+                <div className="mt-4 text-center">
                   <span
-                    className="mx-auto block size-7 rounded-lg border"
+                    className="mx-auto block size-10 rounded-xl border shadow-sm"
                     style={{
-                      background: tool.loadedSpool?.colorHex || 'transparent',
+                      background: selected?.colorHex || 'transparent',
                     }}
                   />
-                  <p className="mt-1 font-mono text-[10px]">{tool.label}</p>
+                  <p className="mt-2 truncate text-xs font-semibold">{selected ? `${selected.code} · ${selected.materialType}` : 'No spool loaded'}</p>
+                  <p className="truncate text-[10px] text-muted-foreground">{selected ? formatInventory(selected.availableWeightG, selected.availableLengthM, preference) : 'Drop a spool here'}</p>
                 </div>
                 <select
-                  className="h-10 w-full rounded-lg border bg-background px-3 text-sm"
-                  value={tool.loadedSpool?.id || ''}
+                  aria-label={`${printer.code} ${tool.label} spool`}
+                  className="mt-3 h-9 w-full rounded-lg border bg-background px-2 text-xs"
+                  value={selectedId}
                   onChange={(e) => load(printer.id, tool.id, e.target.value)}
                 >
                   <option value="">No spool loaded</option>
-                  {spools.map((spool) => (
+                  {orderedFor(selectedId).map((spool) => (
                     <option key={spool.id} value={spool.id}>
                       {spool.code} · {spool.brand} {spool.materialName} ·{' '}
-                      {formatWeight(spool.remainingWeightG)}
+                      {formatInventory(spool.availableWeightG, spool.availableLengthM, preference)}{spool.loadedOn && spool.id !== selectedId ? ` · loaded ${spool.loadedOn.printerCode}/${spool.loadedOn.tool}` : ''}
                     </option>
                   ))}
                 </select>
+                </>; })()}
               </div>
             ))}
           </div>
@@ -1241,6 +1566,7 @@ function PrintersView({
       {!printers.length && (
         <Empty text="No printers configured." />
       )}
+      {!!spools.length && <section className="rounded-2xl border bg-card p-4 shadow-sm"><div className="mb-3"><h2 className="font-bold">Spool tray</h2><p className="text-xs text-muted-foreground">Drag a spool onto a tool slot, or use the selector.</p></div><div className="flex gap-2 overflow-x-auto pb-2">{spools.map((spool) => <button type="button" aria-label={`Drag ${spool.code} to a tool`} key={spool.id} draggable onDragStart={(event) => { event.dataTransfer.setData('application/x-filaflow-spool', spool.id); event.dataTransfer.effectAllowed = 'move'; }} className="flex min-w-48 items-center gap-2 rounded-xl border bg-background p-2 text-left active:cursor-grabbing"><span className="size-8 shrink-0 rounded-lg border" style={{ background: spool.colorHex }} /><span className="min-w-0"><span className="block truncate text-xs font-semibold">{spool.code} · {spool.materialType}</span><span className="block truncate text-[10px] text-muted-foreground">{formatInventory(spool.availableWeightG, spool.availableLengthM, preference)}</span></span></button>)}</div></section>}
       <EditPrinterDialog printer={editingPrinter} open={!!editingPrinter} onOpenChange={(open) => !open && setEditingPrinter(null)} onUpdated={async () => { setEditingPrinter(null); await onRefresh(); }} />
     </div>
   );
@@ -1252,6 +1578,14 @@ function JobsView({
   jobs: Job[];
   onSelect: (job: Job) => void;
 }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => { const timer = window.setInterval(() => setNow(Date.now()), 60000); return () => window.clearInterval(timer); }, []);
+  const age = (value: string) => {
+    const minutes = Math.max(0, Math.floor((now - new Date(value).getTime()) / 60000));
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    return hours < 48 ? `${hours}h ago` : `${Math.floor(hours / 24)}d ago`;
+  };
   return (
     <div className="space-y-3">
       {jobs.map((job) => (
@@ -1279,8 +1613,9 @@ function JobsView({
             </div>
             <h2 className="mt-2 font-bold">{job.displayName}</h2>
             <p className="text-xs text-muted-foreground">
-              {job.printer.code} · {job.filename}
+              {job.printer.code} · {job.filename} · {age(job.createdAt)}
             </p>
+            <p className="mt-1 text-xs text-muted-foreground">{job.slicerProfile || 'Unknown profile'} · {job.routingMode}</p>
           </div>
           <div>
             <p className="text-sm font-semibold">
@@ -1289,7 +1624,7 @@ function JobsView({
             <p className="text-xs text-muted-foreground">
               {formatWeight(
                 job.usages.reduce((s, u) => s + u.estimatedWeightG, 0),
-              )}
+              )} · {formatLength(job.usages.reduce((s, u) => s + u.estimatedLengthM, 0))}
             </p>
           </div>
           <ChevronRight className="self-center text-muted-foreground" />
@@ -1304,10 +1639,14 @@ function JobsView({
 function SettingsView({
   user,
   printers,
+  spools,
+  onUserUpdated,
   onLogout,
 }: {
   user: User;
   printers: Printer[];
+  spools: Spool[];
+  onUserUpdated: (user: User) => void;
   onLogout: () => void;
 }) {
   const [message, setMessage] = useState('');
@@ -1387,6 +1726,16 @@ function SettingsView({
       setUserError(reason instanceof Error ? reason.message : 'Update failed');
     }
   }
+  async function updatePreferredUnit(preferredUnit: User['preferredUnit']) {
+    try {
+      const updated = await api<User>('/api/account/preferences', {
+        method: 'PUT', body: JSON.stringify({ preferred_unit: preferredUnit }),
+      });
+      onUserUpdated(updated);
+    } catch (reason) {
+      setMessage(reason instanceof Error ? reason.message : 'Preference update failed');
+    }
+  }
   const configureCommand =
     token && tokenPrinterId
       ? `python filaflow_hook.py --add-printer "${typeof window === 'undefined' ? '' : window.location.origin}" "${tokenPrinterId}" "${token}" "${printers.find((printer) => printer.id === tokenPrinterId)?.slicerProfile ?? ''}"`
@@ -1398,6 +1747,7 @@ function SettingsView({
         <p className="mt-1 text-sm text-muted-foreground">
           {user.displayName} · {user.email} · {user.role}
         </p>
+        <div className="mt-5 max-w-xs space-y-2"><Label htmlFor="preferred-unit">Inventory units</Label><select id="preferred-unit" className="h-10 w-full rounded-lg border bg-background px-3 text-sm" value={user.preferredUnit} onChange={(event) => void updatePreferredUnit(event.target.value as User['preferredUnit'])}><option value="grams">Grams</option><option value="meters">Meters</option><option value="both">Both</option></select></div>
         <Button variant="outline" className="mt-5" onClick={onLogout}>
           <LogOut className="size-4" /> Sign out
         </Button>
@@ -1462,6 +1812,7 @@ function SettingsView({
       )}
       {user.role === 'admin' && (
         <>
+          <InventorySettingsPanel />
           <section className="rounded-2xl border bg-card p-5">
             <h2 className="font-bold">OpenPrintTag</h2>
             <Button className="mt-5" onClick={sync} disabled={syncing}>
@@ -1532,6 +1883,7 @@ function SettingsView({
           </Button>
         </div>
       </section>
+      <LabelTemplatesPanel user={user} spools={spools} />
       <AddUserDialog
         open={userDialog}
         onOpenChange={setUserDialog}
@@ -1539,6 +1891,109 @@ function SettingsView({
       />
     </div>
   );
+}
+
+function InventorySettingsPanel() {
+  const [payload, setPayload] = useState<ReorderPayload | null>(null);
+  const [threshold, setThreshold] = useState('500');
+  const [error, setError] = useState('');
+  const load = useCallback(() => api<ReorderPayload>('/api/inventory/reorder-suggestions?all=true').then((row) => { setPayload(row); setThreshold(String(row.defaultThresholdG)); }).catch((reason) => setError(reason instanceof Error ? reason.message : 'Could not load reorder settings')), []);
+  useEffect(() => { void load(); }, [load]);
+  async function saveGlobal() {
+    try { await api('/api/inventory/settings', { method: 'PUT', body: JSON.stringify({ reorder_threshold_g: Number(threshold) }) }); await load(); setError(''); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : 'Could not save threshold'); }
+  }
+  async function saveRule(group: ReorderGroup, ignored: boolean, custom?: number | null) {
+    try {
+      await api('/api/inventory/reorder-rules', { method: 'PUT', body: JSON.stringify({ product_key: group.productKey, threshold_g: custom, ignored, product_snapshot: { brand: group.brand, materialName: group.materialName, materialType: group.materialType, colorHex: group.colorHex, diameterMm: group.diameterMm } }) });
+      await load(); setError('');
+    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Could not save reorder rule'); }
+  }
+  return <section className="rounded-2xl border bg-card p-5 lg:col-span-2">
+    <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between"><div><h2 className="font-bold">Reorder suggestions</h2><p className="mt-1 text-sm text-muted-foreground">Suggestions use available stock: remaining minus soft reservations.</p></div><div className="flex items-end gap-2"><div><Label htmlFor="global-threshold">Default threshold (g)</Label><Input id="global-threshold" className="mt-2 w-36" type="number" min="0" value={threshold} onChange={(event) => setThreshold(event.target.value)} /></div><Button onClick={saveGlobal}>Save</Button></div></div>
+    {error && <p className="mt-3 text-sm text-destructive">{error}</p>}
+    <div className="mt-5 grid gap-2 md:grid-cols-2">{payload?.groups.slice(0, 12).map((group) => <div key={group.productKey} className="flex items-center gap-3 rounded-xl border p-3"><span className="size-8 rounded-lg border" style={{ background: group.colorHex }} /><div className="min-w-0 flex-1"><p className="truncate text-sm font-semibold">{group.brand} · {group.materialName}</p><p className="text-xs text-muted-foreground">{formatWeight(group.availableWeightG)} available · threshold {formatWeight(group.thresholdG)}</p></div><Button size="sm" variant="ghost" onClick={() => { const answer = prompt('Custom threshold in grams. Leave empty to use the default.', String(group.thresholdG)); if (answer !== null) void saveRule(group, false, answer.trim() ? Number(answer) : null); }}>Threshold</Button><Button size="sm" variant="ghost" onClick={() => void saveRule(group, !group.ignored, group.thresholdG === payload.defaultThresholdG ? null : group.thresholdG)}>{group.ignored ? 'Enable' : 'Ignore'}</Button></div>)}</div>
+  </section>;
+}
+
+const LABEL_ELEMENT_NAMES: Record<string, string> = {
+  qr: 'QR code', code: 'SPL code', serial: 'Spool serial number', brand: 'Brand', filament: 'Filament name', material: 'Material',
+  color_swatch: 'Color swatch', color_name: 'Color name', color_hex: 'Hex code', location: 'Location', remaining: 'Remaining', custom_text: 'Static text', border: 'Border',
+};
+
+function LabelTemplatesPanel({ user, spools }: { user: User; spools: Spool[] }) {
+  const [templates, setTemplates] = useState<LabelTemplate[]>([]);
+  const [editing, setEditing] = useState<LabelTemplate | null>(null);
+  const [error, setError] = useState('');
+  const load = useCallback(() => api<LabelTemplate[]>('/api/label-templates').then(setTemplates).catch((reason) => setError(reason instanceof Error ? reason.message : 'Could not load label templates')), []);
+  useEffect(() => { void load(); }, [load]);
+  async function duplicate(template: LabelTemplate) {
+    try { const copy = await api<LabelTemplate>(`/api/label-templates/${template.id}/duplicate`, { method: 'POST' }); await load(); setEditing(copy); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : 'Could not duplicate template'); }
+  }
+  async function makeDefault(template: LabelTemplate) { try { await api(`/api/label-templates/${template.id}/default`, { method: 'POST' }); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : 'Could not change the default'); } }
+  async function archive(template: LabelTemplate) { try { await api(`/api/label-templates/${template.id}/archive`, { method: 'POST' }); await load(); } catch (reason) { setError(reason instanceof Error ? reason.message : 'Could not archive template'); } }
+  const previewSpool = spools[0];
+  return <section className="rounded-2xl border bg-card p-5 lg:col-span-2">
+    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><h2 className="font-bold">Label templates</h2><p className="mt-1 text-sm text-muted-foreground">Built-in presets are protected. Duplicate one to create an editable template.</p></div>{user.role === 'admin' && templates[0] && <Button onClick={() => void duplicate(templates.find((row) => row.isDefault) ?? templates[0])}><Plus className="size-4" /> New from default</Button>}</div>
+    {error && <p className="mt-3 text-sm text-destructive">{error}</p>}
+    <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-3">{templates.map((template) => <article key={template.id} className="rounded-xl border p-4"><div className="flex items-start justify-between gap-2"><div><p className="font-semibold">{template.name}</p><p className="text-xs text-muted-foreground">{template.widthMm} × {template.heightMm} mm</p></div><div className="flex gap-1">{template.builtin && <Badge variant="outline">Preset</Badge>}{template.isDefault && <Badge>Default</Badge>}</div></div>{previewSpool && <div className="mt-4 grid h-28 place-items-center overflow-hidden rounded-lg bg-muted p-2"><img src={`/api/spools/${previewSpool.id}/label.svg?templateId=${template.id}`} alt={`Preview of ${template.name}`} className="max-h-full max-w-full shadow" /></div>}<div className="mt-4 flex flex-wrap gap-2">{user.role === 'admin' && <Button size="sm" variant="outline" onClick={() => template.builtin ? void duplicate(template) : setEditing(template)}>{template.builtin ? <Copy className="size-4" /> : <Pencil className="size-4" />}{template.builtin ? 'Duplicate' : 'Edit'}</Button>}{!template.isDefault && user.role === 'admin' && <Button size="sm" variant="ghost" onClick={() => void makeDefault(template)}>Set default</Button>}{!template.builtin && user.role === 'admin' && <Button size="sm" variant="ghost" className="text-destructive" onClick={() => void archive(template)}>Archive</Button>}{previewSpool && <Button size="sm" variant="ghost" onClick={() => window.open(`/labels/print?spools=${previewSpool.id}&template=${template.id}`, '_blank')}>Print test</Button>}</div></article>)}</div>
+    {editing && <LabelEditorDialog template={editing} open onOpenChange={(open) => !open && setEditing(null)} onSaved={async () => { setEditing(null); await load(); }} />}
+  </section>;
+}
+
+function LabelEditorDialog({ template, open, onOpenChange, onSaved }: { template: LabelTemplate; open: boolean; onOpenChange: (open: boolean) => void; onSaved: () => Promise<void> }) {
+  const [name, setName] = useState(template.name);
+  const [width, setWidth] = useState(template.widthMm);
+  const [height, setHeight] = useState(template.heightMm);
+  const [layout, setLayout] = useState<LabelElement[]>(template.layout.map((row) => ({ ...row })));
+  const [selectedId, setSelectedId] = useState(template.layout[0]?.id ?? '');
+  const [history, setHistory] = useState<LabelElement[][]>([]);
+  const [future, setFuture] = useState<LabelElement[][]>([]);
+  const [monochrome, setMonochrome] = useState(false);
+  const [error, setError] = useState('');
+  const selected = layout.find((row) => row.id === selectedId);
+  function commit(next: LabelElement[]) { setHistory((rows) => [...rows.slice(-39), layout]); setLayout(next); setFuture([]); }
+  function patchSelected(changes: Partial<LabelElement>) { if (!selected) return; commit(layout.map((row) => row.id === selected.id ? { ...row, ...changes } : row)); }
+  function undo() { const previous = history.at(-1); if (!previous) return; setFuture((rows) => [layout, ...rows]); setLayout(previous); setHistory((rows) => rows.slice(0, -1)); }
+  function redo() { const next = future[0]; if (!next) return; setHistory((rows) => [...rows, layout]); setLayout(next); setFuture((rows) => rows.slice(1)); }
+  function addElement(type: string) { const isQr = type === 'qr'; const element: LabelElement = { id: `${type}-${Date.now()}`, type, x: 2, y: 2, width: isQr ? 16 : Math.min(30, width - 4), height: isQr ? 16 : 5, font_size: 3, visible: true, text: type === 'custom_text' ? 'Custom text' : '', bold: false }; commit([...layout, element]); setSelectedId(element.id); }
+  function moveLayer(direction: -1 | 1) { if (!selected) return; const index = layout.findIndex((row) => row.id === selected.id); const nextIndex = Math.max(0, Math.min(layout.length - 1, index + direction)); const next = [...layout]; next.splice(index, 1); next.splice(nextIndex, 0, selected); commit(next); }
+  async function save() { try { setError(''); await api(`/api/label-templates/${template.id}`, { method: 'PUT', body: JSON.stringify({ name, width_mm: width, height_mm: height, layout }) }); await onSaved(); } catch (reason) { setError(reason instanceof Error ? reason.message : 'Could not save template'); } }
+  const sample: Record<string, string> = { qr: 'QR', code: 'SPL-0127', serial: 'Spool S/N: SN-0042', brand: 'Prusament', filament: 'Galaxy Black', material: 'PETG', color_name: 'Black', color_hex: '#111827', location: 'Shelf A', remaining: '742 g · 247 m', custom_text: selected?.text || 'Custom text', border: '' };
+  const overflows = layout.filter((row) => row.x < 0 || row.y < 0 || row.x + row.width > width || row.y + row.height > height || (row.type === 'qr' && (row.width < 16 || row.height < 16 || Math.abs(row.width - row.height) > .1)));
+  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="max-h-[94vh] overflow-y-auto sm:max-w-6xl"><DialogHeader><DialogTitle>Label editor</DialogTitle><DialogDescription>Drag elements on the millimetre grid. Select an element to resize or format it.</DialogDescription></DialogHeader>
+    <div className="grid gap-5 lg:grid-cols-[1fr_310px]"><div><div className="mb-3 flex flex-wrap gap-2"><Button size="sm" variant="outline" disabled={!history.length} onClick={undo}><RotateCcw className="size-4" /> Undo</Button><Button size="sm" variant="outline" disabled={!future.length} onClick={redo}>Redo</Button><Button size="sm" variant={monochrome ? 'secondary' : 'outline'} onClick={() => setMonochrome((value) => !value)}><Eye className="size-4" /> Monochrome</Button><select className="h-9 rounded-lg border bg-background px-2 text-sm" defaultValue="" onChange={(event) => { if (event.target.value) addElement(event.target.value); event.target.value = ''; }}><option value="">Add element…</option>{Object.entries(LABEL_ELEMENT_NAMES).map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select></div>
+      <div className="overflow-auto rounded-2xl bg-muted p-5"><div className="relative mx-auto overflow-hidden bg-white shadow-xl" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); const id = event.dataTransfer.getData('text/label-element'); const rect = event.currentTarget.getBoundingClientRect(); const row = layout.find((item) => item.id === id); if (!row) return; const x = Math.round(((event.clientX - rect.left) / rect.width * width - row.width / 2) * 2) / 2; const y = Math.round(((event.clientY - rect.top) / rect.height * height - row.height / 2) * 2) / 2; commit(layout.map((item) => item.id === id ? { ...item, x: Math.max(0, Math.min(width - item.width, x)), y: Math.max(0, Math.min(height - item.height, y)) } : item)); }} style={{ width: 'min(100%, 760px)', aspectRatio: `${width}/${height}`, backgroundImage: 'linear-gradient(#d1d5db55 1px, transparent 1px), linear-gradient(90deg, #d1d5db55 1px, transparent 1px)', backgroundSize: `${100 / width}% ${100 / height}%` }}>
+        {selected && Math.abs(selected.x + selected.width / 2 - width / 2) <= .5 && <span className="pointer-events-none absolute inset-y-0 left-1/2 z-20 border-l border-dashed border-blue-500" />}
+        {selected && Math.abs(selected.y + selected.height / 2 - height / 2) <= .5 && <span className="pointer-events-none absolute inset-x-0 top-1/2 z-20 border-t border-dashed border-blue-500" />}
+        {layout.map((element) => element.visible && <button type="button" key={element.id} aria-label={`Edit ${LABEL_ELEMENT_NAMES[element.type] ?? element.type}`} draggable onDragStart={(event) => event.dataTransfer.setData('text/label-element', element.id)} onClick={() => setSelectedId(element.id)} className={`absolute flex cursor-move select-none items-center overflow-hidden text-left leading-none ${selectedId === element.id ? 'ring-2 ring-blue-500' : 'hover:ring-1 hover:ring-blue-300'} ${element.type === 'border' ? 'border border-gray-900' : ''}`} style={{ left: `${element.x / width * 100}%`, top: `${element.y / height * 100}%`, width: `${element.width / width * 100}%`, height: `${element.height / height * 100}%`, fontSize: `${Math.max(7, element.font_size * 2.4)}px`, fontWeight: element.bold ? 700 : 400, color: '#111827', background: element.type === 'color_swatch' ? (monochrome ? '#fff' : '#111827') : element.type === 'qr' ? 'repeating-conic-gradient(#111 0 25%, #fff 0 50%) 0 / 8px 8px' : undefined }}>{element.type !== 'qr' && element.type !== 'color_swatch' && element.type !== 'border' ? (element.type === 'custom_text' ? element.text : sample[element.type]) : null}</button>)}
+      </div></div>{overflows.length > 0 && <p className="mt-3 rounded-xl bg-orange-500/10 p-3 text-sm text-orange-700">{overflows.length} element(s) violate the label boundary or QR minimum size.</p>}</div>
+      <aside className="space-y-4"><div className="grid grid-cols-2 gap-3"><Field label="Template name" name="labelName" value={name} onChange={(event) => setName(event.target.value)} className="col-span-2" /><Field label="Width (mm)" name="labelWidth" type="number" min="20" max="200" step="0.5" value={width} onChange={(event) => setWidth(Number(event.target.value))} /><Field label="Height (mm)" name="labelHeight" type="number" min="15" max="150" step="0.5" value={height} onChange={(event) => setHeight(Number(event.target.value))} /></div>
+      {selected ? <div className="space-y-3 rounded-xl border p-4"><div className="flex items-center justify-between"><p className="font-semibold">{LABEL_ELEMENT_NAMES[selected.type] ?? selected.type}</p><input aria-label="Show element" type="checkbox" checked={selected.visible} onChange={(event) => patchSelected({ visible: event.target.checked })} /></div><div className="grid grid-cols-2 gap-2">{(['x','y','width','height'] as const).map((key) => <div key={key}><Label className="text-[11px]">{key.toUpperCase()} (mm)</Label><Input type="number" step="0.5" min="0" value={selected[key]} onChange={(event) => patchSelected({ [key]: Number(event.target.value) })} /></div>)}</div>{!['qr','color_swatch','border'].includes(selected.type) && <><div><Label className="text-[11px]">Font size (mm)</Label><Input type="number" min="1.5" max="20" step="0.1" value={selected.font_size} onChange={(event) => patchSelected({ font_size: Number(event.target.value) })} /></div>{selected.type === 'custom_text' && <div><Label className="text-[11px]">Text</Label><Input value={selected.text} onChange={(event) => patchSelected({ text: event.target.value })} /></div>}<label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={selected.bold} onChange={(event) => patchSelected({ bold: event.target.checked })} /> Bold</label></>}<div className="flex gap-2"><Button size="sm" variant="outline" onClick={() => moveLayer(-1)}>Send back</Button><Button size="sm" variant="outline" onClick={() => moveLayer(1)}>Bring forward</Button></div><Button size="sm" variant="ghost" className="text-destructive" onClick={() => { commit(layout.filter((row) => row.id !== selected.id)); setSelectedId(''); }}>Remove element</Button></div> : <p className="text-sm text-muted-foreground">Select an element to edit it.</p>}
+      </aside></div>{error && <p className="text-sm text-destructive">{error}</p>}<DialogFooter><Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button><Button disabled={overflows.length > 0 || !name.trim()} onClick={() => void save()}><Save className="size-4" /> Save template</Button></DialogFooter>
+  </DialogContent></Dialog>;
+}
+
+function LabelPrintView({ spools }: { spools: Spool[] }) {
+  const ids = useMemo(() => new URLSearchParams(window.location.search).get('spools')?.split(',').filter(Boolean) ?? [], []);
+  const [rows, setRows] = useState<Spool[]>(() => spools.filter((row) => ids.includes(row.id)));
+  const [templates, setTemplates] = useState<LabelTemplate[]>([]);
+  const [templateId, setTemplateId] = useState(() => new URLSearchParams(window.location.search).get('template') ?? '');
+  const [monochrome, setMonochrome] = useState(false);
+  useEffect(() => {
+    api<LabelTemplate[]>('/api/label-templates').then((items) => { setTemplates(items); if (!templateId) setTemplateId(items.find((item) => item.isDefault)?.id ?? items[0]?.id ?? ''); }).catch(() => undefined);
+    Promise.all(ids.map((id) => api<Spool>(`/api/spools/${id}`))).then(setRows).catch(() => undefined);
+  }, [ids, templateId]);
+  const template = templates.find((row) => row.id === templateId);
+  return <main className="min-h-screen bg-muted p-5 text-foreground"><style>{`@media print { @page { margin: 0; size: ${template?.widthMm ?? 90}mm ${template?.heightMm ?? 32}mm; } body { background: white !important; } .label-print-controls { display: none !important; } .label-print-sheet { display: block !important; padding: 0 !important; } .label-print-item { margin: 0 !important; break-after: page; box-shadow: none !important; } }`}</style><section className="label-print-controls mx-auto mb-5 flex max-w-4xl flex-wrap items-end gap-3 rounded-2xl border bg-card p-4"><div className="mr-auto"><h1 className="font-bold">Print labels</h1><p className="text-xs text-muted-foreground">Use 100% scale and disable browser headers and footers.</p></div><div><Label htmlFor="print-template">Template</Label><select id="print-template" className="mt-1 h-9 rounded-lg border bg-background px-3 text-sm" value={templateId} onChange={(event) => setTemplateId(event.target.value)}>{templates.map((row) => <option key={row.id} value={row.id}>{row.name}</option>)}</select></div><label className="flex h-9 items-center gap-2 text-sm"><input type="checkbox" checked={monochrome} onChange={(event) => setMonochrome(event.target.checked)} /> Monochrome</label><Button onClick={() => window.print()}><PrinterIcon className="size-4" /> Print</Button></section><section className="label-print-sheet mx-auto grid max-w-5xl gap-4 rounded-2xl bg-white p-5">{rows.map((spool) => <div key={spool.id} className="label-print-item overflow-hidden bg-white shadow" style={template ? { width: `${template.widthMm}mm`, height: `${template.heightMm}mm` } : undefined}><img src={`/api/spools/${spool.id}/label.svg?templateId=${templateId}&monochrome=${monochrome}`} alt={`Label ${spool.code}`} className="block h-full w-full" /></div>)}{!rows.length && <Empty text="No spools selected." />}</section></main>;
+}
+
+function DirectSpoolView({ spoolId, preference }: { spoolId: string; preference: User['preferredUnit'] }) {
+  const [spool, setSpool] = useState<Spool | null>(null);
+  const [error, setError] = useState('');
+  useEffect(() => { api<Spool>(`/api/spools/${spoolId}`).then(setSpool).catch((reason) => setError(reason instanceof Error ? reason.message : 'Spool not found')); }, [spoolId]);
+  return <main className="min-h-screen bg-background p-5"><div className="mx-auto max-w-xl"><Button variant="outline" onClick={() => { window.location.href = '/'; }}><ChevronRight className="size-4 rotate-180" /> Back to FilaFlow</Button>{error && <p className="mt-5 text-sm text-destructive">{error}</p>}{!spool && !error && <div className="mt-5 h-48 animate-pulse rounded-2xl bg-muted" />}{spool && <SpoolDetailSheet spool={spool} open onOpenChange={(open) => { if (!open) window.location.href = '/'; }} preference={preference} />}</div></main>;
 }
 
 function AddUserDialog({
@@ -2279,6 +2734,14 @@ function JobDialog({
   );
   const [error, setError] = useState('');
   const [jobPrinter, setJobPrinter] = useState(job.printer.id);
+  const [rankings, setRankings] = useState<Record<string, Spool[]>>({});
+  useEffect(() => {
+    let active = true;
+    Promise.all(job.usages.map(async (usage) => [usage.id, await api<Spool[]>(`/api/spools/ranked?materialType=${encodeURIComponent(usage.materialType)}&colorHex=${encodeURIComponent(usage.colorHex)}`)] as const))
+      .then((entries) => { if (active) setRankings(Object.fromEntries(entries)); })
+      .catch(() => undefined);
+    return () => { active = false; };
+  }, [job.id, job.usages]);
   async function changePrinter() {
     try {
       await api(`/api/jobs/${job.id}/printer`, { method: 'PUT', body: JSON.stringify({ printer_id: jobPrinter }) });
@@ -2332,6 +2795,16 @@ function JobDialog({
     await api(`/api/jobs/${job.id}/dismiss`, { method: 'POST' });
     await onUpdated();
   }
+  async function quickBook() {
+    try { await api(`/api/jobs/${job.id}/confirm-and-book`, { method: 'POST' }); await onUpdated(); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : 'Quick booking failed'); }
+  }
+  const canQuickBook = job.status === 'NEW' && job.warnings.length === 0 && job.usages.length > 0 && job.usages.every((usage) => usage.suggestedSpoolId);
+  const rankedSpools = (usage: Usage) => rankings[usage.id] ?? [...spools].sort((left, right) => {
+    const materialRank = (row: Spool) => row.materialType.toLowerCase() === usage.materialType.toLowerCase() ? 0 : 1;
+    const colorRank = (row: Spool) => row.colorHex.toLowerCase() === usage.colorHex.toLowerCase() ? 0 : 1;
+    return materialRank(left) - materialRank(right) || colorRank(left) - colorRank(right) || right.availableWeightG - left.availableWeightG;
+  });
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-3xl">
@@ -2344,6 +2817,7 @@ function JobDialog({
         {(job.slicerProfile || job.routingMode === 'default') && (
           <p className="text-xs text-muted-foreground">PrusaSlicer: {job.slicerProfile || 'Unknown profile'} · {job.routingMode}</p>
         )}
+        {['BOOKED', 'DISMISSED'].includes(job.status) && <p className="rounded-xl bg-muted p-3 text-sm">This job was {job.status.toLowerCase()} while it was open. The latest data is shown.</p>}
         {!['BOOKED', 'DISMISSED'].includes(job.status) && (
           <div className="flex gap-2 rounded-xl border p-3">
             <select className="h-10 min-w-0 flex-1 rounded-lg border bg-background px-3 text-sm" value={jobPrinter} onChange={(event) => setJobPrinter(event.target.value)}>
@@ -2380,10 +2854,10 @@ function JobDialog({
                 }
               >
                 <option value="">Select physical spool</option>
-                {spools.map((spool) => (
+                {rankedSpools(usage).map((spool) => (
                   <option key={spool.id} value={spool.id}>
-                    {spool.code} · {spool.brand} {spool.materialName} ·{' '}
-                    {formatWeight(spool.availableWeightG)}
+                    {spool.code} · {spool.brand} {spool.materialName} · {spool.materialType} · {spool.colorName || spool.colorHex} ·{' '}
+                    {formatWeight(spool.availableWeightG)} · {formatLength(spool.availableLengthM)}{spool.loadedOn ? ` · loaded ${spool.loadedOn.printerCode}/${spool.loadedOn.tool}${spool.id !== usage.suggestedSpoolId ? ' (will move)' : ''}` : ''}{spool.availableWeightG < usage.estimatedWeightG ? ' · insufficient stock' : ''}
                   </option>
                 ))}
               </select>
@@ -2408,21 +2882,21 @@ function JobDialog({
           ))}
         </div>
         {error && <p className="text-sm text-destructive">{error}</p>}
-        <DialogFooter>
+        {!['BOOKED', 'DISMISSED'].includes(job.status) && <DialogFooter>
           <Button variant="ghost" onClick={dismiss}>
             <Archive className="size-4" /> Dismiss
           </Button>
           {job.status === 'MAPPED' ? (
             <Button onClick={() => book(false)}>Book usage</Button>
           ) : (
-            <Button
+            <><Button
               onClick={saveMapping}
               disabled={Object.values(mapping).some((value) => !value)}
             >
               Confirm mapping
-            </Button>
+            </Button>{canQuickBook && <Button onClick={quickBook}>Confirm suggested mapping &amp; book</Button>}</>
           )}
-        </DialogFooter>
+        </DialogFooter>}
       </DialogContent>
     </Dialog>
   );

@@ -1,4 +1,6 @@
 from decimal import Decimal
+from typing import Literal
+
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -23,6 +25,10 @@ class UserCreateInput(BaseModel):
 
 class UserStatusInput(BaseModel):
     active: bool
+
+
+class UserPreferenceInput(BaseModel):
+    preferred_unit: Literal["grams", "meters", "both"]
 
 
 class SpoolInput(BaseModel):
@@ -148,3 +154,42 @@ class JobBookInput(BaseModel):
 class TokenInput(BaseModel):
     name: str
     printer_id: str | None = None
+
+
+class InventorySettingsInput(BaseModel):
+    reorder_threshold_g: Decimal = Field(ge=0, le=100_000)
+
+
+class ReorderRuleInput(BaseModel):
+    product_key: str = Field(min_length=1, max_length=500)
+    threshold_g: Decimal | None = Field(default=None, ge=0, le=100_000)
+    ignored: bool = False
+    product_snapshot: dict = Field(default_factory=dict)
+
+
+class LabelElementInput(BaseModel):
+    id: str = Field(min_length=1, max_length=80)
+    type: Literal["qr", "code", "serial", "brand", "filament", "material", "color_swatch", "color_name", "color_hex", "location", "remaining", "custom_text", "border"]
+    x: Decimal = Field(ge=0, le=200)
+    y: Decimal = Field(ge=0, le=150)
+    width: Decimal = Field(gt=0, le=200)
+    height: Decimal = Field(gt=0, le=150)
+    font_size: Decimal = Field(default=3.2, ge=1.5, le=20)
+    visible: bool = True
+    text: str = Field(default="", max_length=160)
+    bold: bool = False
+
+
+class LabelTemplateInput(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    width_mm: Decimal = Field(ge=20, le=200)
+    height_mm: Decimal = Field(ge=15, le=150)
+    layout: list[LabelElementInput] = Field(min_length=1, max_length=40)
+
+    @field_validator("name")
+    @classmethod
+    def clean_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Template name cannot be empty")
+        return value

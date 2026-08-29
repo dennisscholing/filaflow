@@ -207,3 +207,165 @@ def test_edit_route_book_and_analyse_workflow():
         assert mismatch.status_code == 200, mismatch.text
         assert mismatch.json()["status"] == "NEEDS_REVIEW"
         assert any("No matching tool T0" in warning for warning in mismatch.json()["warnings"])
+
+
+def test_v030_preferences_revision_labels_reorder_and_quick_booking():
+    with TestClient(app) as client:
+        login = client.post(
+            "/api/auth/login",
+            json={"email": "admin@test.local", "password": "test-password-123"},
+        )
+        assert login.status_code == 200, login.text
+        csrf = {"X-CSRF-Token": login.json()["csrf"]}
+
+        before = client.get("/api/state/revision")
+        assert before.status_code == 200
+        preferred = client.put(
+            "/api/account/preferences",
+            headers=csrf,
+            json={"preferred_unit": "meters"},
+        )
+        assert preferred.status_code == 200
+        assert preferred.json()["preferredUnit"] == "meters"
+        changed = client.get(
+            "/api/state/revision", headers={"If-None-Match": before.headers["etag"]}
+        )
+        assert changed.status_code == 200
+        unchanged = client.get(
+            "/api/state/revision", headers={"If-None-Match": changed.headers["etag"]}
+        )
+        assert unchanged.status_code == 304
+
+        templates = client.get("/api/label-templates")
+        assert templates.status_code == 200
+        assert len([row for row in templates.json() if row["builtin"]]) == 3
+        source = templates.json()[0]
+        duplicate = client.post(
+            f"/api/label-templates/{source['id']}/duplicate", headers=csrf
+        )
+        assert duplicate.status_code == 201, duplicate.text
+        custom = duplicate.json()
+        edited = client.put(
+            f"/api/label-templates/{custom['id']}",
+            headers=csrf,
+            json={
+                "name": "Integration label",
+                "width_mm": custom["widthMm"],
+                "height_mm": custom["heightMm"],
+                "layout": custom["layout"],
+            },
+        )
+        assert edited.status_code == 200, edited.text
+
+        printer = client.post(
+            "/api/printers",
+            headers=csrf,
+            json={"name": "Quick-book printer", "slicer_profile": "Quick profile", "preset": "single"},
+        )
+        spool = client.post(
+            "/api/spools",
+            headers=csrf,
+            json={
+                "brand": "Quick brand", "material_name": "Quick PLA", "material_type": "PLA",
+                "color_hex": "#112233", "initial_weight_g": 1000,
+            },
+        )
+        assert printer.status_code == 201 and spool.status_code == 201
+        assert client.get("/api/dashboard").status_code == 200
+        for built_in in templates.json():
+            preview = client.get(
+                f"/api/spools/{spool.json()['id']}/label.svg",
+                params={"templateId": built_in["id"]},
+            )
+            assert preview.status_code == 200, f"{built_in['name']}: {preview.text}"
+        loaded = client.put(
+            f"/api/printers/{printer.json()['id']}/tools/{printer.json()['tools'][0]['id']}/loadout",
+            headers=csrf,
+            json={"spool_id": spool.json()["id"]},
+        )
+        assert loaded.status_code == 200
+
+        ranked = client.get(
+            "/api/spools/ranked", params={"materialType": "PLA", "colorHex": "#112233"}
+        )
+        assert ranked.status_code == 200
+        assert ranked.json()[0]["id"] == spool.json()["id"]
+
+        reorder = client.put(
+            "/api/inventory/settings", headers=csrf, json={"reorder_threshold_g": 1200}
+        )
+        assert reorder.status_code == 200
+        suggestions = client.get("/api/inventory/reorder-suggestions?all=true")
+        group = next(row for row in suggestions.json()["groups"] if row["productKey"] == spool.json()["productKey"])
+        assert group["needsOrdering"] is True
+        assert group["shortageG"] == 200
+
+        token = client.post(
+            "/api/tokens", headers=csrf,
+            json={"name": "Quick hook", "printer_id": printer.json()["id"]},
+        )
+        gcode = b"""M83\nT0\nG1 X1 E100\n; filament used [mm] = 100.00\n; filament used [g] = 0.30\n; filament_type = PLA\n; filament_colour = #112233\n"""
+        ingested = client.post(
+            "/api/slicer/jobs",
+            headers={"Authorization": f"Bearer {token.json()['token']}", "Idempotency-Key": "quick-book-v030"},
+            data={"printer_id": printer.json()["id"], "source_profile": "Quick profile", "routing_mode": "profile"},
+            files={"file": ("quick.gcode", gcode, "application/octet-stream")},
+        )
+        assert ingested.status_code == 201, ingested.text
+        assert ingested.json()["status"] == "NEW"
+        booked = client.post(
+            f"/api/jobs/{ingested.json()['id']}/confirm-and-book", headers=csrf
+        )
+        assert booked.status_code == 200, booked.text
+        assert booked.json()["status"] == "BOOKED"
+        assert client.get(f"/api/spools/{spool.json()['id']}").json()["remainingWeightG"] == 999.7
+
+        label = client.get(
+            f"/api/spools/{spool.json()['id']}/label.svg",
+            params={"templateId": custom["id"], "monochrome": True},
+        )
+        assert label.status_code == 200
+        assert "SPL-" in label.text and "Quick PLA" in label.text
+        activity = client.get(
+            "/api/activity", params={"entity_type": "spool", "entity_id": spool.json()["id"]}
+        )
+        assert activity.status_code == 200
+        assert any(row["action"] == "spool.created" for row in activity.json())
+
+        rollback_printer = client.post(
+            "/api/printers", headers=csrf,
+            json={"name": "Rollback printer", "preset": "dual"},
+        ).json()
+        rollback_spools = [
+            client.post(
+                "/api/spools", headers=csrf,
+                json={"brand": "Rollback", "material_name": f"Rollback {index}", "material_type": "PLA", "color_hex": color, "initial_weight_g": 100},
+            ).json()
+            for index, color in enumerate(("#AA0000", "#0000AA"), start=1)
+        ]
+        for tool, rollback_spool in zip(rollback_printer["tools"], rollback_spools, strict=True):
+            response = client.put(
+                f"/api/printers/{rollback_printer['id']}/tools/{tool['id']}/loadout",
+                headers=csrf, json={"spool_id": rollback_spool["id"]},
+            )
+            assert response.status_code == 200
+        rollback_token = client.post(
+            "/api/tokens", headers=csrf,
+            json={"name": "Rollback hook", "printer_id": rollback_printer["id"]},
+        ).json()["token"]
+        dual_gcode = b"""M83\nT0\nG1 E10\nT1\nG1 E20\n; filament used [mm] = 10.00, 20.00\n; filament used [g] = 0.03, 0.06\n; filament_type = PLA;PLA\n; filament_colour = #AA0000;#0000AA\n"""
+        rollback_job = client.post(
+            "/api/slicer/jobs",
+            headers={"Authorization": f"Bearer {rollback_token}", "Idempotency-Key": "rollback-quick-v030"},
+            data={"printer_id": rollback_printer["id"], "routing_mode": "profile"},
+            files={"file": ("rollback.gcode", dual_gcode, "application/octet-stream")},
+        ).json()
+        assert rollback_job["status"] == "NEW"
+        assert client.post(f"/api/spools/{rollback_spools[1]['id']}/archive", headers=csrf).status_code == 200
+        rejected = client.post(
+            f"/api/jobs/{rollback_job['id']}/confirm-and-book", headers=csrf
+        )
+        assert rejected.status_code == 422
+        after_rejection = next(row for row in client.get("/api/jobs").json() if row["id"] == rollback_job["id"])
+        assert after_rejection["status"] == "NEW"
+        assert all(usage["mappedSpoolId"] is None for usage in after_rejection["usages"])
