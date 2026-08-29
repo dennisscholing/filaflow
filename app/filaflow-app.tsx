@@ -829,7 +829,6 @@ function AttentionPanel({ status, summary, onNavigate }: { status: OperationalSt
     { label: 'Negative inventory', value: summary.negativeSpools, target: 'spools' as NavKey },
     { label: 'Jobs older than 7 days', value: status.staleJobs, target: 'jobs' as NavKey },
     { label: 'Unknown slicer profiles', value: status.unknownProfiles, target: 'jobs' as NavKey },
-    { label: 'Not weighed in 90 days', value: status.unweighedSpools, target: 'spools' as NavKey },
     { label: status.catalog.failed ? 'Catalog synchronization failed' : 'Catalog needs attention', value: status.catalog.stale || status.catalog.failed ? 1 : 0, target: 'settings' as NavKey },
     { label: 'Backup needs attention', value: status.backup.stale ? 1 : 0, target: 'settings' as NavKey },
   ].filter((row) => row.value > 0);
