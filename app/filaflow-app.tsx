@@ -1,8 +1,8 @@
 'use client';
 
-/* oxlint-disable typescript/no-deprecated, next/no-img-element -- React form handlers use FormEvent; authenticated SVG previews are intentionally plain images. */
+/* oxlint-disable typescript/no-deprecated, next/no-img-element, jsx-a11y/prefer-tag-over-role -- React form handlers use FormEvent; authenticated SVG previews are intentionally plain images; the graphical label canvas uses ARIA roles because native select/option/range controls cannot represent movable and resizable canvas objects. */
 
-import { FormEvent, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { FormEvent, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   Archive,
@@ -1951,26 +1951,137 @@ function LabelEditorDialog({ template, open, onOpenChange, onSaved }: { template
   const [history, setHistory] = useState<LabelElement[][]>([]);
   const [future, setFuture] = useState<LabelElement[][]>([]);
   const [monochrome, setMonochrome] = useState(false);
+  const [zoom, setZoom] = useState(1);
   const [error, setError] = useState('');
+  const canvasRef = useRef<HTMLDivElement>(null);
+  const gestureRef = useRef<{
+    id: string;
+    mode: 'move' | 'resize';
+    pointerId: number;
+    startClientX: number;
+    startClientY: number;
+    rect: DOMRect;
+    element: LabelElement;
+    originalLayout: LabelElement[];
+    changed: boolean;
+  } | null>(null);
   const selected = layout.find((row) => row.id === selectedId);
   function commit(next: LabelElement[]) { setHistory((rows) => [...rows.slice(-39), layout]); setLayout(next); setFuture([]); }
-  function patchSelected(changes: Partial<LabelElement>) { if (!selected) return; commit(layout.map((row) => row.id === selected.id ? { ...row, ...changes } : row)); }
+  const snap = (value: number) => Math.round(value * 2) / 2;
+  function constrain(element: LabelElement): LabelElement {
+    const minimum = element.type === 'qr' ? 16 : 1;
+    const next = { ...element };
+    next.width = Math.max(minimum, Math.min(width, Number.isFinite(next.width) ? next.width : minimum));
+    next.height = Math.max(minimum, Math.min(height, Number.isFinite(next.height) ? next.height : minimum));
+    if (next.type === 'qr') {
+      const size = Math.max(16, Math.min(width, height, Math.max(next.width, next.height)));
+      next.width = size;
+      next.height = size;
+    }
+    next.x = Math.max(0, Math.min(width - next.width, Number.isFinite(next.x) ? next.x : 0));
+    next.y = Math.max(0, Math.min(height - next.height, Number.isFinite(next.y) ? next.y : 0));
+    return next;
+  }
+  function patchSelected(changes: Partial<LabelElement>) {
+    if (!selected) return;
+    const adjusted = { ...selected, ...changes };
+    if (selected.type === 'qr' && ('width' in changes || 'height' in changes)) {
+      const size = Number(changes.width ?? changes.height ?? selected.width);
+      adjusted.width = size;
+      adjusted.height = size;
+    }
+    commit(layout.map((row) => row.id === selected.id ? constrain(adjusted) : row));
+  }
   function undo() { const previous = history.at(-1); if (!previous) return; setFuture((rows) => [layout, ...rows]); setLayout(previous); setHistory((rows) => rows.slice(0, -1)); }
   function redo() { const next = future[0]; if (!next) return; setHistory((rows) => [...rows, layout]); setLayout(next); setFuture((rows) => rows.slice(1)); }
   function addElement(type: string) { const isQr = type === 'qr'; const element: LabelElement = { id: `${type}-${Date.now()}`, type, x: 2, y: 2, width: isQr ? 16 : Math.min(30, width - 4), height: isQr ? 16 : 5, font_size: 3, visible: true, text: type === 'custom_text' ? 'Custom text' : '', bold: false }; commit([...layout, element]); setSelectedId(element.id); }
   function moveLayer(direction: -1 | 1) { if (!selected) return; const index = layout.findIndex((row) => row.id === selected.id); const nextIndex = Math.max(0, Math.min(layout.length - 1, index + direction)); const next = [...layout]; next.splice(index, 1); next.splice(nextIndex, 0, selected); commit(next); }
+  function alignSelected(mode: 'left' | 'horizontal' | 'vertical') {
+    if (!selected) return;
+    const changes = mode === 'left' ? { x: 0 } : mode === 'horizontal' ? { x: snap((width - selected.width) / 2) } : { y: snap((height - selected.height) / 2) };
+    patchSelected(changes);
+  }
+  function fitElements() { commit(layout.map((row) => constrain(row))); }
+  function beginGesture(event: ReactPointerEvent<HTMLElement>, element: LabelElement, mode: 'move' | 'resize') {
+    if (event.button !== 0 || !canvasRef.current) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setSelectedId(element.id);
+    gestureRef.current = {
+      id: element.id, mode, pointerId: event.pointerId,
+      startClientX: event.clientX, startClientY: event.clientY,
+      rect: canvasRef.current.getBoundingClientRect(), element: { ...element },
+      originalLayout: layout.map((row) => ({ ...row })), changed: false,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+  function continueGesture(event: ReactPointerEvent<HTMLElement>) {
+    const gesture = gestureRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) return;
+    const dx = (event.clientX - gesture.startClientX) / gesture.rect.width * width;
+    const dy = (event.clientY - gesture.startClientY) / gesture.rect.height * height;
+    let updated = { ...gesture.element };
+    if (gesture.mode === 'move') {
+      updated.x = snap(gesture.element.x + dx);
+      updated.y = snap(gesture.element.y + dy);
+    } else if (gesture.element.type === 'qr') {
+      const size = snap(Math.max(16, gesture.element.width + Math.max(dx, dy)));
+      updated.width = size;
+      updated.height = size;
+    } else {
+      updated.width = snap(Math.max(1, gesture.element.width + dx));
+      updated.height = snap(Math.max(1, gesture.element.height + dy));
+    }
+    updated = constrain(updated);
+    gesture.changed = true;
+    setLayout(gesture.originalLayout.map((row) => row.id === gesture.id ? updated : row));
+  }
+  function endGesture(event: ReactPointerEvent<HTMLElement>) {
+    const gesture = gestureRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) return;
+    if (gesture.changed) {
+      setHistory((rows) => [...rows.slice(-39), gesture.originalLayout]);
+      setFuture([]);
+    }
+    gestureRef.current = null;
+  }
+  function nudgeElement(event: ReactKeyboardEvent<HTMLElement>, element: LabelElement) {
+    const delta = event.shiftKey ? 2 : 0.5;
+    const directions: Record<string, Partial<LabelElement>> = {
+      ArrowLeft: { x: element.x - delta }, ArrowRight: { x: element.x + delta },
+      ArrowUp: { y: element.y - delta }, ArrowDown: { y: element.y + delta },
+    };
+    if (!directions[event.key]) return;
+    event.preventDefault();
+    setSelectedId(element.id);
+    commit(layout.map((row) => row.id === element.id ? constrain({ ...element, ...directions[event.key] }) : row));
+  }
+  function resizeElement(event: ReactKeyboardEvent<HTMLElement>, element: LabelElement) {
+    const delta = event.shiftKey ? 2 : 0.5;
+    if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const grow = event.key === 'ArrowRight' || event.key === 'ArrowDown' ? delta : -delta;
+    const updated = element.type === 'qr'
+      ? { ...element, width: element.width + grow, height: element.height + grow }
+      : event.key === 'ArrowLeft' || event.key === 'ArrowRight'
+        ? { ...element, width: element.width + grow }
+        : { ...element, height: element.height + grow };
+    commit(layout.map((row) => row.id === element.id ? constrain(updated) : row));
+  }
   async function save() { try { setError(''); await api(`/api/label-templates/${template.id}`, { method: 'PUT', body: JSON.stringify({ name, width_mm: width, height_mm: height, layout }) }); await onSaved(); } catch (reason) { setError(reason instanceof Error ? reason.message : 'Could not save template'); } }
   const sample: Record<string, string> = { qr: 'QR', code: 'SPL-0127', serial: 'Spool S/N: SN-0042', brand: 'Prusament', filament: 'Galaxy Black', material: 'PETG', color_name: 'Black', color_hex: '#111827', location: 'Shelf A', remaining: '742 g · 247 m', custom_text: selected?.text || 'Custom text', border: '' };
   const overflows = layout.filter((row) => row.x < 0 || row.y < 0 || row.x + row.width > width || row.y + row.height > height || (row.type === 'qr' && (row.width < 16 || row.height < 16 || Math.abs(row.width - row.height) > .1)));
-  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="max-h-[94vh] overflow-y-auto sm:max-w-6xl"><DialogHeader><DialogTitle>Label editor</DialogTitle><DialogDescription>Drag elements on the millimetre grid. Select an element to resize or format it.</DialogDescription></DialogHeader>
-    <div className="grid gap-5 lg:grid-cols-[1fr_310px]"><div><div className="mb-3 flex flex-wrap gap-2"><Button size="sm" variant="outline" disabled={!history.length} onClick={undo}><RotateCcw className="size-4" /> Undo</Button><Button size="sm" variant="outline" disabled={!future.length} onClick={redo}>Redo</Button><Button size="sm" variant={monochrome ? 'secondary' : 'outline'} onClick={() => setMonochrome((value) => !value)}><Eye className="size-4" /> Monochrome</Button><select className="h-9 rounded-lg border bg-background px-2 text-sm" defaultValue="" onChange={(event) => { if (event.target.value) addElement(event.target.value); event.target.value = ''; }}><option value="">Add element…</option>{Object.entries(LABEL_ELEMENT_NAMES).map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select></div>
-      <div className="overflow-auto rounded-2xl bg-muted p-5"><div className="relative mx-auto overflow-hidden bg-white shadow-xl" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); const id = event.dataTransfer.getData('text/label-element'); const rect = event.currentTarget.getBoundingClientRect(); const row = layout.find((item) => item.id === id); if (!row) return; const x = Math.round(((event.clientX - rect.left) / rect.width * width - row.width / 2) * 2) / 2; const y = Math.round(((event.clientY - rect.top) / rect.height * height - row.height / 2) * 2) / 2; commit(layout.map((item) => item.id === id ? { ...item, x: Math.max(0, Math.min(width - item.width, x)), y: Math.max(0, Math.min(height - item.height, y)) } : item)); }} style={{ width: 'min(100%, 760px)', aspectRatio: `${width}/${height}`, backgroundImage: 'linear-gradient(#d1d5db55 1px, transparent 1px), linear-gradient(90deg, #d1d5db55 1px, transparent 1px)', backgroundSize: `${100 / width}% ${100 / height}%` }}>
+  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="max-h-[94vh] overflow-y-auto sm:max-w-7xl"><DialogHeader><DialogTitle>Label editor</DialogTitle><DialogDescription>The canvas uses real CSS millimetres at 100%. Drag from where you grab an element; use the blue handle to resize.</DialogDescription></DialogHeader>
+    <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_330px]"><div><div className="mb-3 flex flex-wrap items-center gap-2"><Button size="sm" variant="outline" disabled={!history.length} onClick={undo}><RotateCcw className="size-4" /> Undo</Button><Button size="sm" variant="outline" disabled={!future.length} onClick={redo}>Redo</Button><Button size="sm" variant={monochrome ? 'secondary' : 'outline'} onClick={() => setMonochrome((value) => !value)}><Eye className="size-4" /> Monochrome</Button><select aria-label="Editor zoom" className="h-9 rounded-lg border bg-background px-2 text-sm" value={zoom} onChange={(event) => setZoom(Number(event.target.value))}><option value="0.75">75%</option><option value="1">100% · actual size</option><option value="1.5">150%</option><option value="2">200%</option></select><select className="h-9 rounded-lg border bg-background px-2 text-sm" defaultValue="" onChange={(event) => { if (event.target.value) addElement(event.target.value); event.target.value = ''; }}><option value="">Add element…</option>{Object.entries(LABEL_ELEMENT_NAMES).map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select><span className="ml-auto text-xs text-muted-foreground">Print size: {width} × {height} mm</span></div>
+      <div className="min-h-72 overflow-auto rounded-2xl bg-muted p-8"><div ref={canvasRef} role="listbox" tabIndex={0} aria-label={`${width} by ${height} millimetre label canvas`} className="relative mx-auto overflow-hidden bg-white shadow-xl" onPointerMove={continueGesture} onPointerUp={endGesture} onPointerCancel={endGesture} onClick={() => setSelectedId('')} onKeyDown={(event) => { if (event.key === 'Escape') setSelectedId(''); }} style={{ width: `${width * zoom}mm`, height: `${height * zoom}mm`, backgroundImage: 'linear-gradient(#d1d5db55 1px, transparent 1px), linear-gradient(90deg, #d1d5db55 1px, transparent 1px)', backgroundSize: `${zoom}mm ${zoom}mm` }}>
         {selected && Math.abs(selected.x + selected.width / 2 - width / 2) <= .5 && <span className="pointer-events-none absolute inset-y-0 left-1/2 z-20 border-l border-dashed border-blue-500" />}
         {selected && Math.abs(selected.y + selected.height / 2 - height / 2) <= .5 && <span className="pointer-events-none absolute inset-x-0 top-1/2 z-20 border-t border-dashed border-blue-500" />}
-        {layout.map((element) => element.visible && <button type="button" key={element.id} aria-label={`Edit ${LABEL_ELEMENT_NAMES[element.type] ?? element.type}`} draggable onDragStart={(event) => event.dataTransfer.setData('text/label-element', element.id)} onClick={() => setSelectedId(element.id)} className={`absolute flex cursor-move select-none items-center overflow-hidden text-left leading-none ${selectedId === element.id ? 'ring-2 ring-blue-500' : 'hover:ring-1 hover:ring-blue-300'} ${element.type === 'border' ? 'border border-gray-900' : ''}`} style={{ left: `${element.x / width * 100}%`, top: `${element.y / height * 100}%`, width: `${element.width / width * 100}%`, height: `${element.height / height * 100}%`, fontSize: `${Math.max(7, element.font_size * 2.4)}px`, fontWeight: element.bold ? 700 : 400, color: '#111827', background: element.type === 'color_swatch' ? (monochrome ? '#fff' : '#111827') : element.type === 'qr' ? 'repeating-conic-gradient(#111 0 25%, #fff 0 50%) 0 / 8px 8px' : undefined }}>{element.type !== 'qr' && element.type !== 'color_swatch' && element.type !== 'border' ? (element.type === 'custom_text' ? element.text : sample[element.type]) : null}</button>)}
+        {layout.map((element) => element.visible && <div role="option" aria-selected={selectedId === element.id} tabIndex={0} key={element.id} aria-label={`Edit ${LABEL_ELEMENT_NAMES[element.type] ?? element.type}`} onPointerDown={(event) => beginGesture(event, element, 'move')} onKeyDown={(event) => nudgeElement(event, element)} onClick={(event) => { event.stopPropagation(); setSelectedId(element.id); }} className={`absolute flex cursor-move touch-none select-none items-center overflow-hidden text-left leading-none ${selectedId === element.id ? 'z-10 ring-2 ring-blue-500' : 'hover:ring-1 hover:ring-blue-300'} ${element.type === 'border' ? 'border border-gray-900' : ''}`} style={{ left: `${element.x / width * 100}%`, top: `${element.y / height * 100}%`, width: `${element.width / width * 100}%`, height: `${element.height / height * 100}%`, fontSize: `${Math.max(1.5, element.font_size) * zoom}mm`, fontWeight: element.bold ? 700 : 400, color: '#111827', background: element.type === 'color_swatch' ? (monochrome ? '#fff' : '#111827') : element.type === 'qr' ? `repeating-conic-gradient(#111 0 25%, #fff 0 50%) 0 / ${2 * zoom}mm ${2 * zoom}mm` : undefined }}>{element.type !== 'qr' && element.type !== 'color_swatch' && element.type !== 'border' ? (element.type === 'custom_text' ? element.text : sample[element.type]) : null}{selectedId === element.id && <span aria-label={`Resize ${LABEL_ELEMENT_NAMES[element.type] ?? element.type}`} role="slider" aria-valuemin={element.type === 'qr' ? 16 : 1} aria-valuemax={Math.min(width - element.x, height - element.y)} aria-valuenow={element.width} tabIndex={0} onPointerDown={(event) => beginGesture(event, element, 'resize')} onKeyDown={(event) => resizeElement(event, element)} className="absolute bottom-0 right-0 size-3 cursor-nwse-resize touch-none rounded-tl bg-blue-600 ring-1 ring-white" />}</div>)}
       </div></div>{overflows.length > 0 && <p className="mt-3 rounded-xl bg-orange-500/10 p-3 text-sm text-orange-700">{overflows.length} element(s) violate the label boundary or QR minimum size.</p>}</div>
-      <aside className="space-y-4"><div className="grid grid-cols-2 gap-3"><Field label="Template name" name="labelName" value={name} onChange={(event) => setName(event.target.value)} className="col-span-2" /><Field label="Width (mm)" name="labelWidth" type="number" min="20" max="200" step="0.5" value={width} onChange={(event) => setWidth(Number(event.target.value))} /><Field label="Height (mm)" name="labelHeight" type="number" min="15" max="150" step="0.5" value={height} onChange={(event) => setHeight(Number(event.target.value))} /></div>
-      {selected ? <div className="space-y-3 rounded-xl border p-4"><div className="flex items-center justify-between"><p className="font-semibold">{LABEL_ELEMENT_NAMES[selected.type] ?? selected.type}</p><input aria-label="Show element" type="checkbox" checked={selected.visible} onChange={(event) => patchSelected({ visible: event.target.checked })} /></div><div className="grid grid-cols-2 gap-2">{(['x','y','width','height'] as const).map((key) => <div key={key}><Label className="text-[11px]">{key.toUpperCase()} (mm)</Label><Input type="number" step="0.5" min="0" value={selected[key]} onChange={(event) => patchSelected({ [key]: Number(event.target.value) })} /></div>)}</div>{!['qr','color_swatch','border'].includes(selected.type) && <><div><Label className="text-[11px]">Font size (mm)</Label><Input type="number" min="1.5" max="20" step="0.1" value={selected.font_size} onChange={(event) => patchSelected({ font_size: Number(event.target.value) })} /></div>{selected.type === 'custom_text' && <div><Label className="text-[11px]">Text</Label><Input value={selected.text} onChange={(event) => patchSelected({ text: event.target.value })} /></div>}<label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={selected.bold} onChange={(event) => patchSelected({ bold: event.target.checked })} /> Bold</label></>}<div className="flex gap-2"><Button size="sm" variant="outline" onClick={() => moveLayer(-1)}>Send back</Button><Button size="sm" variant="outline" onClick={() => moveLayer(1)}>Bring forward</Button></div><Button size="sm" variant="ghost" className="text-destructive" onClick={() => { commit(layout.filter((row) => row.id !== selected.id)); setSelectedId(''); }}>Remove element</Button></div> : <p className="text-sm text-muted-foreground">Select an element to edit it.</p>}
+      <aside className="space-y-4"><div className="grid grid-cols-2 gap-3"><Field label="Template name" name="labelName" value={name} onChange={(event) => setName(event.target.value)} className="col-span-2" /><Field label="Width (mm)" name="labelWidth" type="number" min="20" max="200" step="0.5" value={width} onChange={(event) => { const value = Number(event.target.value); if (Number.isFinite(value)) setWidth(Math.max(20, Math.min(200, value))); }} /><Field label="Height (mm)" name="labelHeight" type="number" min="15" max="150" step="0.5" value={height} onChange={(event) => { const value = Number(event.target.value); if (Number.isFinite(value)) setHeight(Math.max(15, Math.min(150, value))); }} /><Button size="sm" variant="outline" className="col-span-2" onClick={fitElements}>Keep all elements inside label</Button></div>
+      <div><Label htmlFor="selected-label-element" className="text-[11px]">Selected element</Label><select id="selected-label-element" className="mt-1 h-9 w-full rounded-lg border bg-background px-2 text-sm" value={selectedId} onChange={(event) => setSelectedId(event.target.value)}><option value="">None</option>{layout.map((row) => <option key={row.id} value={row.id}>{LABEL_ELEMENT_NAMES[row.type] ?? row.type}</option>)}</select></div>
+      {selected ? <div className="space-y-3 rounded-xl border p-4"><div className="flex items-center justify-between"><p className="font-semibold">{LABEL_ELEMENT_NAMES[selected.type] ?? selected.type}</p><label className="flex items-center gap-2 text-xs"><input aria-label="Show element" type="checkbox" checked={selected.visible} onChange={(event) => patchSelected({ visible: event.target.checked })} /> Visible</label></div><p className="text-xs text-muted-foreground">Drag to move, use the blue corner to resize, or press arrow keys. Hold Shift for 2 mm steps.</p><div className="grid grid-cols-2 gap-2">{(['x','y','width','height'] as const).map((key) => <div key={key}><Label className="text-[11px]">{key.toUpperCase()} (mm)</Label><Input type="number" step="0.5" min="0" value={selected[key]} onChange={(event) => patchSelected({ [key]: Number(event.target.value) })} /></div>)}</div><div className="grid grid-cols-3 gap-1"><Button size="sm" variant="outline" onClick={() => alignSelected('left')}>Left</Button><Button size="sm" variant="outline" onClick={() => alignSelected('horizontal')}>Center X</Button><Button size="sm" variant="outline" onClick={() => alignSelected('vertical')}>Center Y</Button></div>{!['qr','color_swatch','border'].includes(selected.type) && <><div><Label className="text-[11px]">Font size (mm)</Label><Input type="number" min="1.5" max="20" step="0.1" value={selected.font_size} onChange={(event) => patchSelected({ font_size: Number(event.target.value) })} /></div>{selected.type === 'custom_text' && <div><Label className="text-[11px]">Text</Label><Input value={selected.text} onChange={(event) => patchSelected({ text: event.target.value })} /></div>}<label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={selected.bold} onChange={(event) => patchSelected({ bold: event.target.checked })} /> Bold</label></>}<div className="flex gap-2"><Button size="sm" variant="outline" onClick={() => moveLayer(-1)}>Send back</Button><Button size="sm" variant="outline" onClick={() => moveLayer(1)}>Bring forward</Button></div><Button size="sm" variant="ghost" className="text-destructive" onClick={() => { commit(layout.filter((row) => row.id !== selected.id)); setSelectedId(''); }}>Remove element</Button></div> : <p className="text-sm text-muted-foreground">Select an element on the canvas or from the list.</p>}
       </aside></div>{error && <p className="text-sm text-destructive">{error}</p>}<DialogFooter><Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button><Button disabled={overflows.length > 0 || !name.trim()} onClick={() => void save()}><Save className="size-4" /> Save template</Button></DialogFooter>
   </DialogContent></Dialog>;
 }

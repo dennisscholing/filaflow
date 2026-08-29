@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import FileResponse
 from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.exc import IntegrityError
@@ -36,7 +37,7 @@ from .schemas import InventorySettingsInput, JobBookInput, JobMapInput, JobPrint
 from .units import grams_to_mg, length_mm_to_weight_mg, mg_to_grams, weight_mg_to_length_mm
 
 
-app = FastAPI(title="FilaFlow API", version="0.3.0", docs_url="/api/docs", redoc_url=None)
+app = FastAPI(title="FilaFlow API", version="0.3.1", docs_url="/api/docs", redoc_url=None)
 
 
 def spool_json(db: Session, spool: Spool) -> dict:
@@ -920,13 +921,25 @@ def export_json(db: Session = Depends(get_db), user: User = Depends(admin_user))
     return Response(json.dumps(payload, indent=2), media_type="application/json", headers={"Content-Disposition": "attachment; filename=filaflow-export.json"})
 
 
+class SPAStaticFiles(StaticFiles):
+    """Serve the SPA entry point for client-side routes such as /labels/print."""
+
+    def __init__(self, *args, fallback_file: Path, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fallback_file = fallback_file
+
+    async def get_response(self, path: str, scope):
+        try:
+            response = await super().get_response(path, scope)
+        except StarletteHTTPException as exc:
+            if exc.status_code != 404 or "." in Path(path).name:
+                raise
+            return FileResponse(self.fallback_file)
+        if response.status_code == 404 and "." not in Path(path).name:
+            return FileResponse(self.fallback_file)
+        return response
+
+
 web_dir = Path(__file__).resolve().parent.parent / "web"
 if web_dir.exists():
-    class SPAStaticFiles(StaticFiles):
-        async def get_response(self, path: str, scope):
-            response = await super().get_response(path, scope)
-            if response.status_code == 404 and "." not in Path(path).name:
-                return FileResponse(web_dir / "index.html")
-            return response
-
-    app.mount("/", SPAStaticFiles(directory=web_dir, html=True), name="web")
+    app.mount("/", SPAStaticFiles(directory=web_dir, html=True, fallback_file=web_dir / "index.html"), name="web")
