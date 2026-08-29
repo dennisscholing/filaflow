@@ -12,9 +12,10 @@ FilaFlow v0.3.0 focuses on day-to-day stock management. It adds silent five-seco
 
 ## Release process
 
-1. Publish and test `v0.3.0-rc.1` on both `linux/amd64` and `linux/arm64`.
-2. Verify a fresh install, a representative v0.2.0 upgrade, backup validation, restore, frontend build, backend tests, hook tests, and Compose validation.
-3. Promote the exact tested image digest to `v0.3.0` and `latest`; do not rebuild it.
-4. Update the Synology project manually by stopping the project, downloading the selected image, and building the project again.
+1. Push the release commit to `main` and wait until its `candidate` and immutable `sha-…` multi-architecture image is complete.
+2. Tag that same commit as `v0.3.0-rc.1`. The workflow promotes the existing SHA image to this RC tag without rebuilding it.
+3. Verify a fresh install, a representative v0.2.0 upgrade, backup validation, restore, frontend build, backend tests, hook tests, and Compose validation.
+4. Tag the same commit as `v0.3.0`. The workflow promotes the exact same SHA image digest to `v0.3.0` and `latest`; it never rebuilds it.
+5. Update the Synology project manually by stopping the project, downloading the selected image, and building the project again.
 
 The normal upgrade and rollback instructions are in [SYNOLOGY.md](SYNOLOGY.md).

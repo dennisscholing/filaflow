@@ -63,7 +63,7 @@ jobs:
       - run: docker compose --env-file .env.example config --quiet
 
   build:
-    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || contains(github.ref_name, '-'))
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     needs: test
     runs-on: ubuntu-latest
     steps:
@@ -80,8 +80,7 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository_owner }}/filaflow
           tags: |
-            type=raw,value=candidate,enable={{is_default_branch}}
-            type=ref,event=tag
+            type=raw,value=candidate
             type=sha
       - uses: docker/build-push-action@v6
         with:
@@ -92,6 +91,30 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  candidate:
+    if: startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-')
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Promote the tested commit image to the candidate tag
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/filaflow
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          short_sha="${GITHUB_SHA:0:7}"
+          source="${IMAGE}:sha-${short_sha}"
+          docker buildx imagetools inspect "$source"
+          docker buildx imagetools create --tag "${IMAGE}:${RELEASE_TAG}" "$source"
+          source_digest="$(docker buildx imagetools inspect "$source" --format '{{.Manifest.Digest}}')"
+          candidate_digest="$(docker buildx imagetools inspect "${IMAGE}:${RELEASE_TAG}" --format '{{.Manifest.Digest}}')"
+          test "$source_digest" = "$candidate_digest"
 
   promote:
     if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
