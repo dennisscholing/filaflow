@@ -127,6 +127,7 @@ def test_edit_route_book_and_analyse_workflow():
             json={"name": "Workshop hook", "printer_id": first.json()["id"]},
         )
         assert token.status_code == 200, token.text
+        reservation_baseline = client.get("/api/dashboard").json()["summary"]
         gcode = b"""M83\nT0\nG1 X1 E100\n; filament used [mm] = 100.00\n; filament used [g] = 0.30\n; filament_type = PLA\n; filament_colour = #FF0505\n"""
         ingested = client.post(
             "/api/slicer/jobs",
@@ -147,9 +148,9 @@ def test_edit_route_book_and_analyse_workflow():
         assert job["slicerProfile"] == "Unknown local profile"
         assert job["routingMode"] == "default"
         dashboard = client.get("/api/dashboard").json()["summary"]
-        assert dashboard["reservedWeightG"] == 0.3
-        assert dashboard["unassignedReservedWeightG"] == 0.3
-        assert dashboard["mappedReservedWeightG"] == 0
+        assert dashboard["reservedWeightG"] == pytest.approx(reservation_baseline["reservedWeightG"] + 0.3)
+        assert dashboard["unassignedReservedWeightG"] == pytest.approx(reservation_baseline["unassignedReservedWeightG"] + 0.3)
+        assert dashboard["mappedReservedWeightG"] == reservation_baseline["mappedReservedWeightG"]
 
         first_mapping = client.put(
             f"/api/jobs/{job['id']}/mapping",
@@ -163,9 +164,9 @@ def test_edit_route_book_and_analyse_workflow():
         assert first_mapping.status_code == 200, first_mapping.text
         assert client.get(f"/api/spools/{original['id']}").json()["reservedWeightG"] == 0.3
         dashboard = client.get("/api/dashboard").json()["summary"]
-        assert dashboard["reservedWeightG"] == 0.3
-        assert dashboard["mappedReservedWeightG"] == 0.3
-        assert dashboard["unassignedReservedWeightG"] == 0
+        assert dashboard["reservedWeightG"] == pytest.approx(reservation_baseline["reservedWeightG"] + 0.3)
+        assert dashboard["mappedReservedWeightG"] == pytest.approx(reservation_baseline["mappedReservedWeightG"] + 0.3)
+        assert dashboard["unassignedReservedWeightG"] == reservation_baseline["unassignedReservedWeightG"]
 
         changed = client.put(
             f"/api/jobs/{job['id']}/printer",
@@ -179,8 +180,8 @@ def test_edit_route_book_and_analyse_workflow():
         assert corrected["usages"][0]["mappedSpoolId"] is None
         assert client.get(f"/api/spools/{original['id']}").json()["reservedWeightG"] == 0
         dashboard = client.get("/api/dashboard").json()["summary"]
-        assert dashboard["reservedWeightG"] == 0.3
-        assert dashboard["unassignedReservedWeightG"] == 0.3
+        assert dashboard["reservedWeightG"] == pytest.approx(reservation_baseline["reservedWeightG"] + 0.3)
+        assert dashboard["unassignedReservedWeightG"] == pytest.approx(reservation_baseline["unassignedReservedWeightG"] + 0.3)
 
         mapped = client.put(
             f"/api/jobs/{job['id']}/mapping",
@@ -199,7 +200,7 @@ def test_edit_route_book_and_analyse_workflow():
         )
         assert booked.status_code == 200, booked.text
         assert booked.json()["status"] == "BOOKED"
-        assert client.get("/api/dashboard").json()["summary"]["reservedWeightG"] == 0
+        assert client.get("/api/dashboard").json()["summary"]["reservedWeightG"] == reservation_baseline["reservedWeightG"]
 
         analytics = client.get(
             "/api/analytics/usage", params={"days": 30, "timezone": "Europe/Amsterdam"}
