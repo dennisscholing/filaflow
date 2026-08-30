@@ -2093,6 +2093,8 @@ function LabelPrintView({ spools }: { spools: Spool[] }) {
   const [monochrome, setMonochrome] = useState(false);
   const [loadedLabelIds, setLoadedLabelIds] = useState<Set<string>>(new Set());
   const [imageError, setImageError] = useState('');
+  const [savingImages, setSavingImages] = useState(false);
+  const [saveMessage, setSaveMessage] = useState('');
   useEffect(() => {
     api<LabelTemplate[]>('/api/label-templates').then((items) => { setTemplates(items); setTemplateId((current) => current || items.find((item) => item.isDefault)?.id || items[0]?.id || ''); }).catch(() => undefined);
   }, []);
@@ -2104,6 +2106,50 @@ function LabelPrintView({ spools }: { spools: Spool[] }) {
   const heightMm = template?.heightMm ?? 32;
   const imageKey = (spoolId: string) => `${spoolId}:${templateId}:${monochrome}`;
   const readyToPrint = Boolean(template && rows.length && rows.every((spool) => loadedLabelIds.has(imageKey(spool.id))) && !imageError);
+  async function saveImages() {
+    if (!template || !readyToPrint) return;
+    setSavingImages(true);
+    setSaveMessage('');
+    try {
+      const isB1Pro50x30 = Math.abs(widthMm - 50) < 0.01 && Math.abs(heightMm - 30) < 0.01;
+      const pixelWidth = isB1Pro50x30 ? 584 : Math.max(1, Math.round(widthMm / 25.4 * 300));
+      const pixelHeight = isB1Pro50x30 ? 354 : Math.max(1, Math.round(heightMm / 25.4 * 300));
+      for (const spool of rows) {
+        const response = await fetch(`/api/spools/${spool.id}/label.svg?templateId=${templateId}&monochrome=${monochrome}`);
+        if (!response.ok) throw new Error(`Label ${spool.code} could not be exported`);
+        const svgUrl = URL.createObjectURL(await response.blob());
+        try {
+          const image = new Image();
+          image.src = svgUrl;
+          await new Promise<void>((resolve, reject) => { image.onload = () => resolve(); image.onerror = () => reject(new Error(`Label ${spool.code} could not be rendered`)); });
+          const canvas = document.createElement('canvas');
+          canvas.width = pixelWidth;
+          canvas.height = pixelHeight;
+          const context = canvas.getContext('2d');
+          if (!context) throw new Error('PNG export is unavailable in this browser');
+          context.fillStyle = '#ffffff';
+          context.fillRect(0, 0, pixelWidth, pixelHeight);
+          context.drawImage(image, 0, 0, pixelWidth, pixelHeight);
+          const png = await new Promise<Blob>((resolve, reject) => canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error('PNG export failed')), 'image/png'));
+          const pngUrl = URL.createObjectURL(png);
+          const link = document.createElement('a');
+          link.href = pngUrl;
+          link.download = `${spool.code}-${widthMm}x${heightMm}mm.png`;
+          document.body.appendChild(link);
+          link.click();
+          link.remove();
+          window.setTimeout(() => URL.revokeObjectURL(pngUrl), 1000);
+        } finally {
+          URL.revokeObjectURL(svgUrl);
+        }
+      }
+      setSaveMessage(`${rows.length} PNG ${rows.length === 1 ? 'image' : 'images'} saved at ${pixelWidth} × ${pixelHeight} px.`);
+    } catch (reason) {
+      setSaveMessage(reason instanceof Error ? reason.message : 'PNG export failed');
+    } finally {
+      setSavingImages(false);
+    }
+  }
   return <main className="label-print-root min-h-screen bg-muted p-5 text-foreground"><style>{`@media print {
     @page { margin: 0; size: ${widthMm}mm ${heightMm}mm; }
     html, body, #root { width: ${widthMm}mm !important; margin: 0 !important; padding: 0 !important; background: white !important; }
@@ -2113,7 +2159,7 @@ function LabelPrintView({ spools }: { spools: Spool[] }) {
     .label-print-item { width: ${widthMm}mm !important; height: ${heightMm}mm !important; margin: 0 !important; overflow: hidden !important; break-inside: avoid; break-after: page; page-break-inside: avoid; page-break-after: always; box-shadow: none !important; }
     .label-print-item:last-child { break-after: auto; page-break-after: auto; }
     .label-print-item img { display: block !important; width: 100% !important; height: 100% !important; print-color-adjust: exact; -webkit-print-color-adjust: exact; }
-  }`}</style><section className="label-print-controls mx-auto mb-5 flex max-w-4xl flex-wrap items-end gap-3 rounded-2xl border bg-card p-4"><div className="mr-auto"><h1 className="font-bold">Print labels</h1><p className="text-xs text-muted-foreground">Use 100% scale, zero margins, and disable browser headers and footers.</p>{!readyToPrint && rows.length > 0 && !imageError && <p className="mt-1 text-xs text-muted-foreground">Preparing label preview…</p>}{imageError && <p className="mt-1 text-xs text-destructive">{imageError}</p>}</div><div><Label htmlFor="print-template">Template</Label><select id="print-template" className="mt-1 h-9 rounded-lg border bg-background px-3 text-sm" value={templateId} onChange={(event) => { setImageError(''); setTemplateId(event.target.value); }}>{templates.map((row) => <option key={row.id} value={row.id}>{row.name}</option>)}</select></div><label className="flex h-9 items-center gap-2 text-sm"><input type="checkbox" checked={monochrome} onChange={(event) => { setImageError(''); setMonochrome(event.target.checked); }} /> Monochrome</label><Button disabled={!readyToPrint} onClick={() => window.print()}><PrinterIcon className="size-4" /> Print</Button></section><section className="label-print-sheet mx-auto grid max-w-5xl gap-4 rounded-2xl bg-white p-5">{template && rows.map((spool) => <div key={spool.id} className="label-print-item overflow-hidden bg-white shadow" style={{ width: `${widthMm}mm`, height: `${heightMm}mm` }}><img key={imageKey(spool.id)} src={`/api/spools/${spool.id}/label.svg?templateId=${templateId}&monochrome=${monochrome}`} alt={`Label ${spool.code}`} className="block h-full w-full" onLoad={() => setLoadedLabelIds((current) => new Set(current).add(imageKey(spool.id)))} onError={() => setImageError(`Label ${spool.code} could not be loaded. Refresh this page and try again.`)} /></div>)}{!rows.length && <Empty text="No spools selected." />}</section></main>;
+  }`}</style><section className="label-print-controls mx-auto mb-5 flex max-w-4xl flex-wrap items-end gap-3 rounded-2xl border bg-card p-4"><div className="mr-auto"><h1 className="font-bold">Print labels</h1><p className="text-xs text-muted-foreground">Use 100% scale, zero margins, and disable browser headers and footers.</p>{!readyToPrint && rows.length > 0 && !imageError && <p className="mt-1 text-xs text-muted-foreground">Preparing label preview…</p>}{imageError && <p className="mt-1 text-xs text-destructive">{imageError}</p>}{saveMessage && <p className="mt-1 text-xs text-muted-foreground">{saveMessage}</p>}</div><div><Label htmlFor="print-template">Template</Label><select id="print-template" className="mt-1 h-9 rounded-lg border bg-background px-3 text-sm" value={templateId} onChange={(event) => { setImageError(''); setSaveMessage(''); setTemplateId(event.target.value); }}>{templates.map((row) => <option key={row.id} value={row.id}>{row.name}</option>)}</select></div><label className="flex h-9 items-center gap-2 text-sm"><input type="checkbox" checked={monochrome} onChange={(event) => { setImageError(''); setSaveMessage(''); setMonochrome(event.target.checked); }} /> Monochrome</label><Button variant="outline" disabled={!readyToPrint || savingImages} onClick={() => void saveImages()}><Download className="size-4" /> {savingImages ? 'Saving…' : rows.length > 1 ? 'Save images' : 'Save image'}</Button><Button disabled={!readyToPrint} onClick={() => window.print()}><PrinterIcon className="size-4" /> Print</Button></section><section className="label-print-sheet mx-auto grid max-w-5xl gap-4 rounded-2xl bg-white p-5">{template && rows.map((spool) => <div key={spool.id} className="label-print-item overflow-hidden bg-white shadow" style={{ width: `${widthMm}mm`, height: `${heightMm}mm` }}><img key={imageKey(spool.id)} src={`/api/spools/${spool.id}/label.svg?templateId=${templateId}&monochrome=${monochrome}`} alt={`Label ${spool.code}`} className="block h-full w-full" onLoad={() => setLoadedLabelIds((current) => new Set(current).add(imageKey(spool.id)))} onError={() => setImageError(`Label ${spool.code} could not be loaded. Refresh this page and try again.`)} /></div>)}{!rows.length && <Empty text="No spools selected." />}</section></main>;
 }
 
 function DirectSpoolView({ spoolId, preference }: { spoolId: string; preference: User['preferredUnit'] }) {
