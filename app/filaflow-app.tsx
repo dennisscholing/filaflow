@@ -2767,17 +2767,22 @@ function WeighDialog({
   onUpdated: () => Promise<void>;
 }) {
   const [error, setError] = useState('');
+  const [mode, setMode] = useState<'weigh' | 'consume'>('weigh');
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!spool) return;
     const f = new FormData(event.currentTarget);
+    const consumedWeight = Number(f.get('consumedWeightG'));
+    const allowNegative = mode === 'consume' && consumedWeight > spool.remainingWeightG
+      ? window.confirm(`${spool.code} will become negative. Record this inventory discrepancy?`)
+      : false;
+    if (mode === 'consume' && consumedWeight > spool.remainingWeightG && !allowNegative) return;
     try {
       await api(`/api/spools/${spool.id}/weigh`, {
         method: 'POST',
-        body: JSON.stringify({
-          total_weight_g: Number(f.get('totalWeightG')),
-          note: f.get('note'),
-        }),
+        body: JSON.stringify(mode === 'weigh'
+          ? { total_weight_g: Number(f.get('totalWeightG')), note: f.get('note') }
+          : { consumed_weight_g: consumedWeight, allow_negative: allowNegative, note: f.get('note') }),
       });
       await onUpdated();
     } catch (reason) {
@@ -2788,24 +2793,26 @@ function WeighDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Weigh {spool?.code}</DialogTitle>
+          <DialogTitle>Update {spool?.code} inventory</DialogTitle>
           <DialogDescription>
-            Enter the total weight including the spool.
+            Set the remaining amount by weighing, or subtract known filament usage.
           </DialogDescription>
         </DialogHeader>
-        <form className="space-y-4" onSubmit={submit}>
-          <Field
-            label="Total weight (g)"
-            name="totalWeightG"
-            type="number"
-            step="0.1"
-            required
-          />
-          <Field label="Note" name="note" defaultValue="Manual weighing" />
+        <div className="grid grid-cols-2 gap-2 rounded-lg bg-muted p-1">
+          <Button type="button" variant={mode === 'weigh' ? 'default' : 'ghost'} onClick={() => { setMode('weigh'); setError(''); }}>Weigh spool</Button>
+          <Button type="button" variant={mode === 'consume' ? 'default' : 'ghost'} onClick={() => { setMode('consume'); setError(''); }}>Subtract usage</Button>
+        </div>
+        <form key={`${spool?.id}-${mode}`} className="space-y-4" onSubmit={submit}>
+          {mode === 'weigh' ? (
+            <Field label="Total weight including spool (g)" name="totalWeightG" type="number" min="0" step="0.1" required />
+          ) : (
+            <Field label="Filament used (g)" name="consumedWeightG" type="number" min="0.1" step="0.1" required />
+          )}
+          <Field label="Note" name="note" defaultValue={mode === 'weigh' ? 'Manual weighing' : 'Manual filament usage'} />
           {error && <p className="text-sm text-destructive">{error}</p>}
           <DialogFooter>
             <Button type="submit">
-              <Scale className="size-4" /> Apply correction
+              <Scale className="size-4" /> {mode === 'weigh' ? 'Apply correction' : 'Subtract usage'}
             </Button>
           </DialogFooter>
         </form>

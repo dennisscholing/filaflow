@@ -100,6 +100,8 @@ class SpoolUpdateInput(BaseModel):
 class WeighInput(BaseModel):
     total_weight_g: Decimal | None = None
     net_weight_g: Decimal | None = None
+    consumed_weight_g: Decimal | None = None
+    allow_negative: bool = False
     note: str = "Manual weighing"
 
 

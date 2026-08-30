@@ -1,6 +1,6 @@
 # FilaFlow
 
-FilaFlow is a self-hosted filament inventory for multiple FFF printers. Prusa INDX with tools T1–T8 is the primary acceptance profile, but every printer can have a dynamic number of tools.
+FilaFlow is a self-hosted filament inventory for multiple FFF printers. Prusa INDX is shown as T1–T8 while mapping to G-code indexes 0–7. Every printer can have a dynamic number of tools.
 
 FilaFlow never controls, pauses, approves, or blocks a print. The PrusaSlicer hook stores a copy in a local outbox and always exits successfully. Mapping, soft reservations, and final consumption are administrative actions performed during or after printing.
 
@@ -8,7 +8,7 @@ FilaFlow never controls, pauses, approves, or blocks a print. The PrusaSlicer ho
 
 - Dark, responsive English interface.
 - Physical spools with UUIDv7, immutable `SPL` codes, weight and length, ledger history, weighing, QR labels, and archiving.
-- Multiple printers with `PRN` codes, single/dual/INDX T1–T8 presets, dynamic tools, and loadouts.
+- Multiple printers with `PRN` codes, single/dual/INDX presets, dynamic tools, and loadouts. INDX slots are displayed as T1–T8 and mapped to G-code indexes 0–7.
 - Automatic multi-printer routing from one PrusaSlicer installation, including physical-printer profile aliases and a safe default.
 - Print inbox with `NEW`, `MAPPED`, `NEEDS_REVIEW`, `BOOKED`, and `DISMISSED` states.
 - Regular G-code and binary `.bgcode` through the official libbgcode CLI.

@@ -37,6 +37,9 @@ def test_edit_route_book_and_analyse_workflow():
         assert first.status_code == 201, first.text
         assert second.status_code == 201, second.text
         assert indx.status_code == 201, indx.text
+        assert [(tool["index"], tool["label"]) for tool in indx.json()["tools"]] == [
+            (index, f"T{index + 1}") for index in range(8)
+        ]
 
         edited_printer = client.put(
             f"/api/printers/{second.json()['id']}",
@@ -101,6 +104,16 @@ def test_edit_route_book_and_analyse_workflow():
         }
         detail = client.get(f"/api/spools/{original['id']}")
         assert any(entry["kind"] == "METADATA_CORRECTION" for entry in detail.json()["ledger"])
+
+        consumed = client.post(
+            f"/api/spools/{original['id']}/weigh",
+            headers=csrf,
+            json={"consumed_weight_g": 10, "note": "Missing slicer job"},
+        )
+        assert consumed.status_code == 200, consumed.text
+        assert consumed.json()["remainingWeightG"] == 990
+        detail = client.get(f"/api/spools/{original['id']}")
+        assert detail.json()["ledger"][0]["kind"] == "MANUAL_CONSUMPTION"
 
         colors = client.get("/api/colors/nearest", params={"hex": "#FF0505"})
         locations = client.get("/api/locations")
@@ -205,8 +218,10 @@ def test_edit_route_book_and_analyse_workflow():
             json={"printer_id": indx.json()["id"]},
         )
         assert mismatch.status_code == 200, mismatch.text
-        assert mismatch.json()["status"] == "NEEDS_REVIEW"
-        assert any("No matching tool T0" in warning for warning in mismatch.json()["warnings"])
+        assert mismatch.json()["status"] == "NEW"
+        assert mismatch.json()["usages"][0]["toolIndex"] == 0
+        assert mismatch.json()["usages"][0]["toolLabel"] == "T1"
+        assert not any("No matching tool" in warning for warning in mismatch.json()["warnings"])
 
 
 def test_v030_preferences_revision_labels_reorder_and_quick_booking():

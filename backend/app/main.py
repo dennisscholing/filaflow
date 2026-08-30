@@ -37,7 +37,7 @@ from .schemas import InventorySettingsInput, JobBookInput, JobMapInput, JobPrint
 from .units import grams_to_mg, length_mm_to_weight_mg, mg_to_grams, weight_mg_to_length_mm
 
 
-app = FastAPI(title="FilaFlow API", version="0.3.4", docs_url="/api/docs", redoc_url=None)
+app = FastAPI(title="FilaFlow API", version="0.4.0", docs_url="/api/docs", redoc_url=None)
 
 
 def spool_json(db: Session, spool: Spool) -> dict:
@@ -472,13 +472,26 @@ def get_spool(spool_id: uuid.UUID, db: Session = Depends(get_db), user: User = D
 def weigh_spool(spool_id: uuid.UUID, data: WeighInput, db: Session = Depends(get_db), user: User = Depends(current_user)):
     spool = db.get(Spool, spool_id, with_for_update=True)
     if not spool: raise HTTPException(404, "Spool not found")
-    if data.net_weight_g is None and data.total_weight_g is None: raise HTTPException(422, "Enter a total or net weight")
-    target_mg = grams_to_mg(data.net_weight_g) if data.net_weight_g is not None else grams_to_mg(data.total_weight_g) - spool.tare_weight_mg
+    supplied = [data.total_weight_g is not None, data.net_weight_g is not None, data.consumed_weight_g is not None]
+    if sum(supplied) != 1: raise HTTPException(422, "Enter exactly one total, net, or consumed weight")
+    if data.consumed_weight_g is not None:
+        consumed_mg = grams_to_mg(data.consumed_weight_g)
+        if consumed_mg <= 0: raise HTTPException(422, "Consumed weight must be greater than zero")
+        target_mg = spool.remaining_weight_mg - consumed_mg
+        if target_mg < 0 and not data.allow_negative:
+            raise HTTPException(409, f"{spool.code} would become negative; confirm the inventory discrepancy")
+        entry_kind = "MANUAL_CONSUMPTION"
+        audit_action = "spool.consumption_recorded"
+    else:
+        target_mg = grams_to_mg(data.net_weight_g) if data.net_weight_g is not None else grams_to_mg(data.total_weight_g) - spool.tare_weight_mg
+        entry_kind = "WEIGHING"
+        audit_action = "spool.weighed"
     target_length = weight_mg_to_length_mm(target_mg, spool.diameter_mm, spool.density_g_cm3)
     delta_weight, delta_length = target_mg - spool.remaining_weight_mg, target_length - spool.remaining_length_mm
     spool.remaining_weight_mg, spool.remaining_length_mm = target_mg, target_length
-    db.add(InventoryEntry(spool_id=spool.id, kind="WEIGHING", weight_delta_mg=delta_weight, length_delta_mm=delta_length, diameter_mm=spool.diameter_mm, density_g_cm3=spool.density_g_cm3, note=data.note, actor_id=user.id))
-    audit(db, user, "spool.weighed", "spool", spool.id, {"weight_delta_mg": delta_weight}); db.commit()
+    if target_mg < 0 or target_length < 0: spool.discrepancy = True
+    db.add(InventoryEntry(spool_id=spool.id, kind=entry_kind, weight_delta_mg=delta_weight, length_delta_mm=delta_length, diameter_mm=spool.diameter_mm, density_g_cm3=spool.density_g_cm3, note=data.note, actor_id=user.id))
+    audit(db, user, audit_action, "spool", spool.id, {"weight_delta_mg": delta_weight}); db.commit()
     return spool_json(db, spool)
 
 
@@ -607,10 +620,12 @@ def list_printers(db: Session = Depends(get_db), user: User = Depends(current_us
 def create_printer(data: PrinterInput, db: Session = Depends(get_db), user: User = Depends(current_user)):
     counts = {"single": 1, "dual": 2, "indx8": 8}
     count = data.tool_count or counts.get(data.preset, 1)
-    start_index = 1 if data.preset == "indx8" else 0
+    start_index = 0
     printer = Printer(code=next_code(db, Printer, "PRN"), name=data.name.strip(), manufacturer=data.manufacturer.strip(), model=data.model.strip(), location=data.location.strip(), slicer_profile=data.slicer_profile.strip(), notes=data.notes.strip())
     db.add(printer); db.flush()
-    for index in range(start_index, start_index + count): db.add(PrinterTool(printer_id=printer.id, slicer_index=index, label=f"T{index}", nozzle_diameter_mm=Decimal("0.4")))
+    for index in range(start_index, start_index + count):
+        label_index = index + 1 if data.preset == "indx8" else index
+        db.add(PrinterTool(printer_id=printer.id, slicer_index=index, label=f"T{label_index}", nozzle_diameter_mm=Decimal("0.4")))
     audit(db, user, "printer.created", "printer", printer.id, {"tools": count}); db.commit()
     printer = db.scalar(select(Printer).where(Printer.id == printer.id).options(selectinload(Printer.tools).selectinload(PrinterTool.loaded_spool)))
     return printer_json(printer)
