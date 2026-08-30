@@ -15,9 +15,10 @@ FilaFlow never controls, pauses, approves, or blocks a print. The PrusaSlicer ho
 - OpenPrintTag catalog synchronization plus fully manual materials.
 - Editable spool and printer metadata, offline color-name suggestions, and real 30-day usage in grams and metres.
 - Silent five-second refresh, attention indicators, available-stock reorder suggestions, and per-user unit preferences.
+- Dashboard reservations include all open inbox jobs, with mapped and unassigned estimates shown separately.
 - Card/table spool views with saved filters, CIEDE2000 color matching, bulk selection, and configurable columns.
 - Guided, server-rendered SVG label templates with protected presets and exact-size browser printing.
-- Admin/operator users, printer-bound API tokens, audit log, CSV/JSON export, daily backups, and verified pre-upgrade backups.
+- Admin/operator users, secure password changes and resets, printer-bound API tokens, audit log, CSV/JSON export, daily backups, and verified pre-upgrade backups.
 - Prebuilt `linux/amd64` and `linux/arm64` images for Synology Container Manager.
 
 ## Install

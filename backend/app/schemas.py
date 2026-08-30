@@ -31,6 +31,15 @@ class UserPreferenceInput(BaseModel):
     preferred_unit: Literal["grams", "meters", "both"]
 
 
+class PasswordChangeInput(BaseModel):
+    current_password: str = Field(min_length=1, max_length=256)
+    new_password: str = Field(min_length=12, max_length=256)
+
+
+class AdminPasswordResetInput(BaseModel):
+    temporary_password: str = Field(min_length=12, max_length=256)
+
+
 class SpoolInput(BaseModel):
     brand: str = "Generic"
     material_name: str

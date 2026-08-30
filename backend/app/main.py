@@ -33,18 +33,17 @@ from .gcode import parse_gcode
 from .ids import next_code
 from .labels import DEFAULT_LAYOUT, render_label, template_json, validate_layout
 from .models import ApiToken, AuditEvent, CatalogMaterial, CatalogSnapshot, InventoryEntry, InventorySetting, JobUsage, LabelTemplate, PrintJob, Printer, PrinterTool, ReorderRule, Spool, User, now_utc
-from .schemas import InventorySettingsInput, JobBookInput, JobMapInput, JobPrinterInput, LabelTemplateInput, LoadoutInput, LoginInput, PrinterInput, PrinterUpdateInput, ReorderRuleInput, SpoolInput, SpoolUpdateInput, TokenInput, UserCreateInput, UserPreferenceInput, UserStatusInput, WeighInput
+from .schemas import AdminPasswordResetInput, InventorySettingsInput, JobBookInput, JobMapInput, JobPrinterInput, LabelTemplateInput, LoadoutInput, LoginInput, PasswordChangeInput, PrinterInput, PrinterUpdateInput, ReorderRuleInput, SpoolInput, SpoolUpdateInput, TokenInput, UserCreateInput, UserPreferenceInput, UserStatusInput, WeighInput
 from .units import grams_to_mg, length_mm_to_weight_mg, mg_to_grams, weight_mg_to_length_mm
 
 
-app = FastAPI(title="FilaFlow API", version="0.4.0", docs_url="/api/docs", redoc_url=None)
+app = FastAPI(title="FilaFlow API", version="0.5.0", docs_url="/api/docs", redoc_url=None)
 
 
 def spool_json(db: Session, spool: Spool) -> dict:
-    reserved_weight = db.scalar(select(func.coalesce(func.sum(JobUsage.actual_weight_mg), 0)).join(PrintJob).where(JobUsage.mapped_spool_id == spool.id, PrintJob.status == "MAPPED")) or 0
-    if not reserved_weight:
-        reserved_weight = db.scalar(select(func.coalesce(func.sum(JobUsage.estimated_weight_mg), 0)).join(PrintJob).where(JobUsage.mapped_spool_id == spool.id, PrintJob.status == "MAPPED")) or 0
-    reserved_length = db.scalar(select(func.coalesce(func.sum(JobUsage.estimated_length_mm), 0)).join(PrintJob).where(JobUsage.mapped_spool_id == spool.id, PrintJob.status == "MAPPED")) or Decimal("0")
+    open_statuses = ["MAPPED", "NEEDS_REVIEW"]
+    reserved_weight = db.scalar(select(func.coalesce(func.sum(func.coalesce(JobUsage.actual_weight_mg, JobUsage.estimated_weight_mg)), 0)).join(PrintJob).where(JobUsage.mapped_spool_id == spool.id, PrintJob.status.in_(open_statuses))) or 0
+    reserved_length = db.scalar(select(func.coalesce(func.sum(func.coalesce(JobUsage.actual_length_mm, JobUsage.estimated_length_mm)), 0)).join(PrintJob).where(JobUsage.mapped_spool_id == spool.id, PrintJob.status.in_(open_statuses))) or Decimal("0")
     loaded = db.scalar(select(PrinterTool).where(PrinterTool.loaded_spool_id == spool.id).options(selectinload(PrinterTool.printer)))
     last_weighed = db.scalar(select(InventoryEntry.created_at).where(InventoryEntry.spool_id == spool.id, InventoryEntry.kind == "WEIGHING").order_by(InventoryEntry.created_at.desc()).limit(1))
     return {
@@ -97,7 +96,7 @@ def render_spool_label(spool: Spool, target: str) -> bytes:
 
 
 def user_json(user: User) -> dict:
-    return {"id": str(user.id), "email": user.email, "displayName": user.display_name, "role": user.role, "preferredUnit": user.preferred_unit, "active": user.active, "createdAt": user.created_at.isoformat()}
+    return {"id": str(user.id), "email": user.email, "displayName": user.display_name, "role": user.role, "preferredUnit": user.preferred_unit, "mustChangePassword": user.must_change_password, "active": user.active, "createdAt": user.created_at.isoformat()}
 
 
 def product_key(spool: Spool) -> str:
@@ -193,6 +192,21 @@ def account_preferences(data: UserPreferenceInput, db: Session = Depends(get_db)
     return user_json(user)
 
 
+@app.put("/api/account/password")
+def account_password(data: PasswordChangeInput, response: Response, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    if not verify_password(user.password_hash, data.current_password):
+        raise HTTPException(422, "Current password is incorrect")
+    if verify_password(user.password_hash, data.new_password):
+        raise HTTPException(422, "New password must be different from the current password")
+    user.password_hash = hash_password(data.new_password)
+    user.must_change_password = False
+    user.auth_version += 1
+    audit(db, user, "account.password_changed", "user", user.id)
+    db.commit()
+    set_session(response, user)
+    return user_json(user)
+
+
 @app.get("/api/state/revision")
 def state_revision(request: Request, db: Session = Depends(get_db), user: User = Depends(current_user)):
     payload = latest_revision(db)
@@ -216,7 +230,7 @@ def create_user(data: UserCreateInput, db: Session = Depends(get_db), user: User
         raise HTTPException(422, "Enter a valid email address")
     if not display_name:
         raise HTTPException(422, "Enter a display name")
-    record = User(email=email, display_name=display_name, password_hash=hash_password(data.password), role=data.role, active=True)
+    record = User(email=email, display_name=display_name, password_hash=hash_password(data.password), role=data.role, must_change_password=True, active=True)
     db.add(record)
     try:
         db.flush()
@@ -241,6 +255,23 @@ def update_user_status(user_id: uuid.UUID, data: UserStatusInput, db: Session = 
             raise HTTPException(409, "At least one active administrator is required")
     record.active = data.active
     audit(db, user, "user.activated" if data.active else "user.deactivated", "user", record.id)
+    db.commit()
+    return user_json(record)
+
+
+@app.put("/api/users/{user_id}/password")
+def reset_user_password(user_id: uuid.UUID, data: AdminPasswordResetInput, db: Session = Depends(get_db), user: User = Depends(admin_user)):
+    record = db.get(User, user_id)
+    if not record:
+        raise HTTPException(404, "User not found")
+    if record.id == user.id:
+        raise HTTPException(409, "Change your own password under Account")
+    if verify_password(record.password_hash, data.temporary_password):
+        raise HTTPException(422, "Temporary password must be different from the current password")
+    record.password_hash = hash_password(data.temporary_password)
+    record.must_change_password = True
+    record.auth_version += 1
+    audit(db, user, "user.password_reset", "user", record.id)
     db.commit()
     return user_json(record)
 
@@ -350,14 +381,17 @@ def dashboard(db: Session = Depends(get_db), user: User = Depends(current_user))
     spool_payload = [spool_json(db, spool) for spool in spools]
     remaining_weight = sum(spool.remaining_weight_mg for spool in spools)
     remaining_length = sum((spool.remaining_length_mm for spool in spools), Decimal("0"))
-    reserved_weight = sum(int(item["reservedWeightG"] * 1000) for item in spool_payload)
-    reserved_length = sum(Decimal(str(item["reservedLengthM"])) * 1000 for item in spool_payload)
+    open_statuses = ["NEW", "MAPPED", "NEEDS_REVIEW"]
+    reserved_weight = db.scalar(select(func.coalesce(func.sum(func.coalesce(JobUsage.actual_weight_mg, JobUsage.estimated_weight_mg)), 0)).join(PrintJob).where(PrintJob.status.in_(open_statuses))) or 0
+    reserved_length = db.scalar(select(func.coalesce(func.sum(func.coalesce(JobUsage.actual_length_mm, JobUsage.estimated_length_mm)), 0)).join(PrintJob).where(PrintJob.status.in_(open_statuses))) or Decimal("0")
+    mapped_reserved_weight = db.scalar(select(func.coalesce(func.sum(func.coalesce(JobUsage.actual_weight_mg, JobUsage.estimated_weight_mg)), 0)).join(PrintJob).where(PrintJob.status.in_(open_statuses), JobUsage.mapped_spool_id.is_not(None))) or 0
+    mapped_reserved_length = db.scalar(select(func.coalesce(func.sum(func.coalesce(JobUsage.actual_length_mm, JobUsage.estimated_length_mm)), 0)).join(PrintJob).where(PrintJob.status.in_(open_statuses), JobUsage.mapped_spool_id.is_not(None))) or Decimal("0")
     printers = db.scalars(select(Printer).where(Printer.archived.is_(False)).options(selectinload(Printer.tools).selectinload(PrinterTool.loaded_spool))).all()
     jobs = db.scalars(select(PrintJob).where(PrintJob.status.in_(["NEW", "MAPPED", "NEEDS_REVIEW"])).options(selectinload(PrintJob.usages)).order_by(PrintJob.created_at.desc()).limit(8)).all()
     open_job_count = db.scalar(select(func.count()).select_from(PrintJob).where(PrintJob.status.in_(["NEW", "MAPPED", "NEEDS_REVIEW"]))) or 0
     status = operational_status(db)
     reorder = reorder_payload(db)
-    return {"summary": {"remainingWeightG": mg_to_grams(remaining_weight), "remainingLengthM": float(remaining_length / 1000), "reservedWeightG": mg_to_grams(reserved_weight), "reservedLengthM": float(reserved_length / 1000), "availableWeightG": mg_to_grams(remaining_weight - reserved_weight), "availableLengthM": float((remaining_length - reserved_length) / 1000), "activeSpools": len(spools), "lowStockSpools": sum(1 for spool in spools if spool.remaining_weight_mg <= spool.low_stock_weight_mg), "loadedSpools": sum(1 for item in spool_payload if item["loadedOn"]), "openJobs": open_job_count, "negativeSpools": sum(1 for item in spool_payload if item["availableWeightG"] < 0)}, "spools": spool_payload[:8], "printers": [printer_json(p) for p in printers], "jobs": [job_json(j) for j in jobs], "attention": status, "reorder": {"defaultThresholdG": reorder["defaultThresholdG"], "groups": reorder["groups"][:8]}}
+    return {"summary": {"remainingWeightG": mg_to_grams(remaining_weight), "remainingLengthM": float(remaining_length / 1000), "reservedWeightG": mg_to_grams(int(reserved_weight)), "reservedLengthM": float(Decimal(reserved_length) / 1000), "mappedReservedWeightG": mg_to_grams(int(mapped_reserved_weight)), "mappedReservedLengthM": float(Decimal(mapped_reserved_length) / 1000), "unassignedReservedWeightG": mg_to_grams(int(reserved_weight) - int(mapped_reserved_weight)), "unassignedReservedLengthM": float((Decimal(reserved_length) - Decimal(mapped_reserved_length)) / 1000), "availableWeightG": mg_to_grams(remaining_weight - int(reserved_weight)), "availableLengthM": float((remaining_length - Decimal(reserved_length)) / 1000), "activeSpools": len(spools), "lowStockSpools": sum(1 for spool in spools if spool.remaining_weight_mg <= spool.low_stock_weight_mg), "loadedSpools": sum(1 for item in spool_payload if item["loadedOn"]), "openJobs": open_job_count, "negativeSpools": sum(1 for item in spool_payload if item["availableWeightG"] < 0)}, "spools": spool_payload[:8], "printers": [printer_json(p) for p in printers], "jobs": [job_json(j) for j in jobs], "attention": status, "reorder": {"defaultThresholdG": reorder["defaultThresholdG"], "groups": reorder["groups"][:8]}}
 
 
 @app.get("/api/spools")

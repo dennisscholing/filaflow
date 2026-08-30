@@ -14,6 +14,7 @@ import {
   Download,
   Ellipsis,
   Eye,
+  EyeOff,
   GripVertical,
   Inbox,
   LayoutGrid,
@@ -33,7 +34,6 @@ import {
   TableProperties,
   UserPlus,
   Users,
-  Warehouse,
   X,
 } from 'lucide-react';
 import {
@@ -84,6 +84,7 @@ type User = {
   displayName: string;
   role: string;
   preferredUnit: 'grams' | 'meters' | 'both';
+  mustChangePassword: boolean;
   active: boolean;
   createdAt: string;
 };
@@ -224,6 +225,10 @@ type Dashboard = {
     remainingLengthM: number;
     reservedWeightG: number;
     reservedLengthM: number;
+    mappedReservedWeightG: number;
+    mappedReservedLengthM: number;
+    unassignedReservedWeightG: number;
+    unassignedReservedLengthM: number;
     availableWeightG: number;
     availableLengthM: number;
     activeSpools: number;
@@ -332,6 +337,10 @@ const formatInventory = (weightG: number, lengthM: number, preference: User['pre
     : preference === 'meters'
       ? formatLength(lengthM)
       : `${formatWeight(weightG)} · ${formatLength(lengthM)}`;
+const formText = (form: FormData, name: string) => {
+  const value = form.get(name);
+  return typeof value === 'string' ? value : '';
+};
 
 export function FilaFlowApp() {
   const [user, setUser] = useState<User | null>(null);
@@ -375,13 +384,13 @@ export function FilaFlowApp() {
     api<User>('/api/auth/me')
       .then((me) => {
         setUser(me);
-        return refresh();
+        return me.mustChangePassword ? undefined : refresh();
       })
       .catch(() => setUser(null))
       .finally(() => setLoading(false));
   }, [refresh]);
   useEffect(() => {
-    if (!user) return;
+    if (!user || user.mustChangePassword) return;
     let stopped = false;
     async function checkRevision() {
       if (document.visibilityState === 'hidden') return;
@@ -389,6 +398,7 @@ export function FilaFlowApp() {
         const headers = new Headers();
         if (revisionRef.current) headers.set('If-None-Match', `"${revisionRef.current}"`);
         const response = await fetch('/api/state/revision', { credentials: 'include', headers });
+        if (response.status === 401) { location.reload(); return; }
         if (response.status === 304) { if (!stopped) setPollFailures(0); return; }
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const value = (await response.json()) as { revision: string };
@@ -428,7 +438,7 @@ export function FilaFlowApp() {
         }),
       });
       setUser(result.user);
-      await refresh();
+      if (!result.user.mustChangePassword) await refresh();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Sign-in failed');
     }
@@ -441,6 +451,8 @@ export function FilaFlowApp() {
       </div>
     );
   if (!user) return <LoginScreen onSubmit={login} error={error} />;
+  if (user.mustChangePassword)
+    return <RequiredPasswordChange user={user} onChanged={(updated) => { setUser(updated); void refresh(); }} onLogout={async () => { await api('/api/auth/logout', { method: 'POST' }); location.reload(); }} />;
   if (typeof window !== 'undefined' && window.location.pathname === '/labels/print')
     return <LabelPrintView spools={spools} />;
   if (typeof window !== 'undefined' && /^\/spools\/[0-9a-f-]+$/i.test(window.location.pathname))
@@ -636,6 +648,38 @@ function LoginScreen({
     </main>
   );
 }
+
+function RequiredPasswordChange({ user, onChanged, onLogout }: { user: User; onChanged: (user: User) => void; onLogout: () => void }) {
+  const [error, setError] = useState('');
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const next = formText(form, 'newPassword');
+    setError('');
+    if (next !== formText(form, 'confirmPassword')) { setError('New passwords do not match'); return; }
+    try {
+      const updated = await api<User>('/api/account/password', { method: 'PUT', body: JSON.stringify({ current_password: formText(form, 'currentPassword'), new_password: next }) });
+      onChanged(updated);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Password change failed'); }
+  }
+  return (
+    <main className="grid min-h-screen place-items-center bg-[#14241f] p-6">
+      <div className="w-full max-w-md rounded-3xl bg-background p-7 shadow-2xl">
+        <Brand />
+        <h1 className="text-2xl font-bold">Choose a new password</h1>
+        <p className="mt-1 text-sm text-muted-foreground">Signed in as {user.email}</p>
+        <form className="mt-6 space-y-4" onSubmit={submit}>
+          <PasswordField label="Temporary password" name="currentPassword" autoComplete="current-password" required />
+          <PasswordField label="New password" name="newPassword" minLength={12} autoComplete="new-password" required />
+          <PasswordField label="Confirm new password" name="confirmPassword" minLength={12} autoComplete="new-password" required />
+          {error && <p className="rounded-xl bg-destructive/10 p-3 text-sm text-destructive">{error}</p>}
+          <Button className="w-full" type="submit">Change password</Button>
+          <Button className="w-full" type="button" variant="ghost" onClick={onLogout}>Sign out</Button>
+        </form>
+      </div>
+    </main>
+  );
+}
 function Brand() {
   return (
     <div className="flex items-center gap-3 px-2 pb-7">
@@ -694,22 +738,17 @@ function Overview({
   const s = dashboard.summary;
   const metrics = [
     {
-      label: 'Remaining',
-      value: formatInventory(s.remainingWeightG, s.remainingLengthM, preference),
-      note: `${s.activeSpools} active spools`,
-      icon: Warehouse,
+      label: 'Available',
+      value: formatInventory(s.availableWeightG, s.availableLengthM, preference),
+      note: `After ${s.openJobs} open jobs · ${s.activeSpools} active spools`,
+      icon: CircleGauge,
     },
     {
       label: 'Reserved',
       value: formatInventory(s.reservedWeightG, s.reservedLengthM, preference),
-      note: `${s.openJobs} open jobs`,
+      note: `${s.openJobs} jobs · ${formatInventory(s.mappedReservedWeightG, s.mappedReservedLengthM, preference)} mapped · ${formatInventory(s.unassignedReservedWeightG, s.unassignedReservedLengthM, preference)} unassigned`,
       icon: Layers3,
-    },
-    {
-      label: 'Available',
-      value: formatInventory(s.availableWeightG, s.availableLengthM, preference),
-      note: `${s.negativeSpools} negative`,
-      icon: CircleGauge,
+      onClick: () => onNavigate('jobs'),
     },
     {
       label: 'Low stock',
@@ -727,12 +766,9 @@ function Overview({
         <Button size="sm" variant="outline" onClick={onAddPrinter}><PrinterIcon className="size-4" /> Add printer</Button>
         <Button size="sm" variant="outline" onClick={() => onNavigate('jobs')}><Inbox className="size-4" /> Process job</Button>
       </section>
-      <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        {metrics.map(({ label, value, note, icon: Icon }) => (
-          <article
-            key={label}
-            className="rounded-2xl border bg-card p-5 shadow-sm"
-          >
+      <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+        {metrics.map(({ label, value, note, icon: Icon, onClick }) => {
+          const content = <>
             <div className="flex items-center justify-between">
               <p className="text-sm font-medium text-muted-foreground">
                 {label}
@@ -743,8 +779,11 @@ function Overview({
             </div>
             <p className="mt-4 text-2xl font-bold tracking-tight">{value}</p>
             <p className="mt-1 text-xs text-muted-foreground">{note}</p>
-          </article>
-        ))}
+          </>;
+          return onClick
+            ? <button key={label} type="button" onClick={onClick} className="rounded-2xl border bg-card p-5 text-left shadow-sm transition hover:border-primary/50 hover:bg-accent/30">{content}</button>
+            : <article key={label} className="rounded-2xl border bg-card p-5 text-left shadow-sm">{content}</article>;
+        })}
       </section>
       <div className="grid gap-6 xl:grid-cols-2">
         <AttentionPanel status={dashboard.attention} summary={dashboard.summary} onNavigate={onNavigate} />
@@ -1655,6 +1694,10 @@ function SettingsView({
   const [users, setUsers] = useState<User[]>([]);
   const [userDialog, setUserDialog] = useState(false);
   const [userError, setUserError] = useState('');
+  const [userMessage, setUserMessage] = useState('');
+  const [resetUser, setResetUser] = useState<User | null>(null);
+  const [passwordError, setPasswordError] = useState('');
+  const [passwordMessage, setPasswordMessage] = useState('');
   const loadUsers = useCallback(async () => {
     if (user.role !== 'admin') return;
     try {
@@ -1735,6 +1778,31 @@ function SettingsView({
       setMessage(reason instanceof Error ? reason.message : 'Preference update failed');
     }
   }
+  async function changePassword(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
+    const next = formText(form, 'newPassword');
+    setPasswordError(''); setPasswordMessage('');
+    if (next !== formText(form, 'confirmPassword')) { setPasswordError('New passwords do not match'); return; }
+    try {
+      const updated = await api<User>('/api/account/password', { method: 'PUT', body: JSON.stringify({ current_password: formText(form, 'currentPassword'), new_password: next }) });
+      onUserUpdated(updated); setPasswordMessage('Password changed.'); formElement.reset();
+    } catch (reason) { setPasswordError(reason instanceof Error ? reason.message : 'Password change failed'); }
+  }
+  async function resetPassword(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!resetUser) return;
+    const form = new FormData(event.currentTarget);
+    const temporary = formText(form, 'temporaryPassword');
+    setUserError(''); setUserMessage('');
+    if (temporary !== formText(form, 'confirmTemporaryPassword')) { setUserError('Temporary passwords do not match'); return; }
+    try {
+      const displayName = resetUser.displayName;
+      await api(`/api/users/${resetUser.id}/password`, { method: 'PUT', body: JSON.stringify({ temporary_password: temporary }) });
+      setResetUser(null); setUserMessage(`Temporary password set for ${displayName}.`); await loadUsers();
+    } catch (reason) { setUserError(reason instanceof Error ? reason.message : 'Password reset failed'); }
+  }
   const configureCommand =
     token && tokenPrinterId
       ? `python filaflow_hook.py --add-printer "${typeof window === 'undefined' ? '' : window.location.origin}" "${tokenPrinterId}" "${token}" "${printers.find((printer) => printer.id === tokenPrinterId)?.slicerProfile ?? ''}"`
@@ -1747,6 +1815,15 @@ function SettingsView({
           {user.displayName} · {user.email} · {user.role}
         </p>
         <div className="mt-5 max-w-xs space-y-2"><Label htmlFor="preferred-unit">Inventory units</Label><select id="preferred-unit" className="h-10 w-full rounded-lg border bg-background px-3 text-sm" value={user.preferredUnit} onChange={(event) => void updatePreferredUnit(event.target.value as User['preferredUnit'])}><option value="grams">Grams</option><option value="meters">Meters</option><option value="both">Both</option></select></div>
+        <form className="mt-6 max-w-md space-y-3 border-t pt-5" onSubmit={changePassword}>
+          <h3 className="text-sm font-semibold">Change password</h3>
+          <PasswordField label="Current password" name="currentPassword" autoComplete="current-password" required />
+          <PasswordField label="New password" name="newPassword" minLength={12} autoComplete="new-password" required />
+          <PasswordField label="Confirm new password" name="confirmPassword" minLength={12} autoComplete="new-password" required />
+          {passwordError && <p className="text-sm text-destructive">{passwordError}</p>}
+          {passwordMessage && <p className="text-sm text-emerald-600">{passwordMessage}</p>}
+          <Button type="submit" variant="outline">Change password</Button>
+        </form>
         <Button variant="outline" className="mt-5" onClick={onLogout}>
           <LogOut className="size-4" /> Sign out
         </Button>
@@ -1783,11 +1860,20 @@ function SettingsView({
                       {account.active ? 'Active' : 'Inactive'}
                     </Badge>
                     <Badge variant="outline">{account.role}</Badge>
+                    {account.mustChangePassword && <Badge variant="outline">Password change required</Badge>}
                   </div>
                   <p className="truncate text-xs text-muted-foreground">
                     {account.email}
                   </p>
                 </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={account.id === user.id}
+                  onClick={() => { setUserError(''); setUserMessage(''); setResetUser(account); }}
+                >
+                  Reset password
+                </Button>
                 <Button
                   size="sm"
                   variant="outline"
@@ -1807,6 +1893,7 @@ function SettingsView({
           {userError && (
             <p className="mt-3 text-sm text-destructive">{userError}</p>
           )}
+          {userMessage && <p className="mt-3 text-sm text-emerald-600">{userMessage}</p>}
         </section>
       )}
       {user.role === 'admin' && (
@@ -1888,6 +1975,16 @@ function SettingsView({
         onOpenChange={setUserDialog}
         onCreated={loadUsers}
       />
+      <Dialog open={Boolean(resetUser)} onOpenChange={(open) => { if (!open) setResetUser(null); }}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader><DialogTitle>Reset password</DialogTitle><DialogDescription>Set a temporary password for {resetUser?.displayName}. Existing browser sessions will be signed out.</DialogDescription></DialogHeader>
+          <form key={resetUser?.id} className="space-y-4" onSubmit={resetPassword}>
+            <PasswordField label="Temporary password" name="temporaryPassword" minLength={12} autoComplete="new-password" required />
+            <PasswordField label="Confirm temporary password" name="confirmTemporaryPassword" minLength={12} autoComplete="new-password" required />
+            <DialogFooter><Button type="button" variant="outline" onClick={() => setResetUser(null)}>Cancel</Button><Button type="submit">Reset password</Button></DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -2257,6 +2354,21 @@ function Field({
     <div className="space-y-2">
       <Label htmlFor={name}>{label}</Label>
       <Input id={name} name={name} {...props} />
+    </div>
+  );
+}
+
+function PasswordField({ label, name, ...props }: { label: string; name: string } & Omit<React.ComponentProps<typeof Input>, 'type'>) {
+  const [visible, setVisible] = useState(false);
+  return (
+    <div className="space-y-2">
+      <Label htmlFor={name}>{label}</Label>
+      <div className="relative">
+        <Input id={name} name={name} type={visible ? 'text' : 'password'} className="pr-10" {...props} />
+        <button type="button" className="absolute inset-y-0 right-0 grid w-10 place-items-center text-muted-foreground" onClick={() => setVisible((value) => !value)} aria-label={visible ? `Hide ${label.toLowerCase()}` : `Show ${label.toLowerCase()}`}>
+          {visible ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+        </button>
+      </div>
     </div>
   );
 }

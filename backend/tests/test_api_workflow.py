@@ -1,3 +1,4 @@
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -145,6 +146,10 @@ def test_edit_route_book_and_analyse_workflow():
         assert job["status"] == "NEEDS_REVIEW"
         assert job["slicerProfile"] == "Unknown local profile"
         assert job["routingMode"] == "default"
+        dashboard = client.get("/api/dashboard").json()["summary"]
+        assert dashboard["reservedWeightG"] == 0.3
+        assert dashboard["unassignedReservedWeightG"] == 0.3
+        assert dashboard["mappedReservedWeightG"] == 0
 
         first_mapping = client.put(
             f"/api/jobs/{job['id']}/mapping",
@@ -157,6 +162,10 @@ def test_edit_route_book_and_analyse_workflow():
         )
         assert first_mapping.status_code == 200, first_mapping.text
         assert client.get(f"/api/spools/{original['id']}").json()["reservedWeightG"] == 0.3
+        dashboard = client.get("/api/dashboard").json()["summary"]
+        assert dashboard["reservedWeightG"] == 0.3
+        assert dashboard["mappedReservedWeightG"] == 0.3
+        assert dashboard["unassignedReservedWeightG"] == 0
 
         changed = client.put(
             f"/api/jobs/{job['id']}/printer",
@@ -169,6 +178,9 @@ def test_edit_route_book_and_analyse_workflow():
         assert corrected["routingMode"] == "corrected"
         assert corrected["usages"][0]["mappedSpoolId"] is None
         assert client.get(f"/api/spools/{original['id']}").json()["reservedWeightG"] == 0
+        dashboard = client.get("/api/dashboard").json()["summary"]
+        assert dashboard["reservedWeightG"] == 0.3
+        assert dashboard["unassignedReservedWeightG"] == 0.3
 
         mapped = client.put(
             f"/api/jobs/{job['id']}/mapping",
@@ -187,6 +199,7 @@ def test_edit_route_book_and_analyse_workflow():
         )
         assert booked.status_code == 200, booked.text
         assert booked.json()["status"] == "BOOKED"
+        assert client.get("/api/dashboard").json()["summary"]["reservedWeightG"] == 0
 
         analytics = client.get(
             "/api/analytics/usage", params={"days": 30, "timezone": "Europe/Amsterdam"}
@@ -328,11 +341,15 @@ def test_v030_preferences_revision_labels_reorder_and_quick_booking():
         )
         assert ingested.status_code == 201, ingested.text
         assert ingested.json()["status"] == "NEW"
+        before_booking = client.get("/api/dashboard").json()["summary"]
+        assert before_booking["unassignedReservedWeightG"] >= 0.3
         booked = client.post(
             f"/api/jobs/{ingested.json()['id']}/confirm-and-book", headers=csrf
         )
         assert booked.status_code == 200, booked.text
         assert booked.json()["status"] == "BOOKED"
+        after_booking = client.get("/api/dashboard").json()["summary"]
+        assert after_booking["reservedWeightG"] == pytest.approx(before_booking["reservedWeightG"] - 0.3)
         assert client.get(f"/api/spools/{spool.json()['id']}").json()["remainingWeightG"] == 999.7
 
         label = client.get(
@@ -384,3 +401,38 @@ def test_v030_preferences_revision_labels_reorder_and_quick_booking():
         after_rejection = next(row for row in client.get("/api/jobs").json() if row["id"] == rollback_job["id"])
         assert after_rejection["status"] == "NEW"
         assert all(usage["mappedSpoolId"] is None for usage in after_rejection["usages"])
+        before_dismiss = client.get("/api/dashboard").json()["summary"]["reservedWeightG"]
+        assert client.post(f"/api/jobs/{rollback_job['id']}/dismiss", headers=csrf).status_code == 200
+        after_dismiss = client.get("/api/dashboard").json()["summary"]["reservedWeightG"]
+        assert after_dismiss == pytest.approx(before_dismiss - 0.09)
+
+
+def test_password_change_admin_reset_and_session_invalidation():
+    with TestClient(app) as admin, TestClient(app) as operator:
+        login = admin.post("/api/auth/login", json={"email": "admin@test.local", "password": "test-password-123"})
+        assert login.status_code == 200, login.text
+        admin_csrf = {"X-CSRF-Token": login.json()["csrf"]}
+        created = admin.post("/api/users", headers=admin_csrf, json={
+            "email": "password-test@filaflow.local", "display_name": "Password test",
+            "password": "initial-password-123", "role": "admin",
+        })
+        assert created.status_code == 201, created.text
+        account = created.json()
+        assert account["mustChangePassword"] is True
+        assert admin.put(f"/api/users/{login.json()['user']['id']}/password", headers=admin_csrf, json={"temporary_password": "not-for-self-123"}).status_code == 409
+
+        signed_in = operator.post("/api/auth/login", json={"email": account["email"], "password": "initial-password-123"})
+        assert signed_in.status_code == 200 and signed_in.json()["user"]["mustChangePassword"] is True
+        operator_csrf = {"X-CSRF-Token": signed_in.json()["csrf"]}
+        assert operator.get("/api/dashboard").status_code == 403
+        changed = operator.put("/api/account/password", headers=operator_csrf, json={"current_password": "initial-password-123", "new_password": "permanent-password-123"})
+        assert changed.status_code == 200, changed.text
+        assert changed.json()["mustChangePassword"] is False
+
+        printer_id = admin.get("/api/printers").json()[0]["id"]
+        token = operator.post("/api/tokens", headers={"X-CSRF-Token": operator.cookies.get("filaflow_csrf")}, json={"name": "Password reset token", "printer_id": printer_id})
+        assert token.status_code == 200, token.text
+        reset = admin.put(f"/api/users/{account['id']}/password", headers=admin_csrf, json={"temporary_password": "reset-password-123"})
+        assert reset.status_code == 200 and reset.json()["mustChangePassword"] is True
+        assert operator.get("/api/auth/me").status_code == 401
+        assert operator.get("/api/printers", headers={"Authorization": f"Bearer {token.json()['token']}"}).status_code == 200

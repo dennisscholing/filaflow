@@ -40,7 +40,7 @@ def issue_api_token() -> str:
 
 def set_session(response: Response, user: User) -> str:
     csrf = secrets.token_urlsafe(24)
-    signed = serializer.dumps({"uid": str(user.id), "csrf": csrf})
+    signed = serializer.dumps({"uid": str(user.id), "csrf": csrf, "av": user.auth_version})
     response.set_cookie("filaflow_session", signed, max_age=SESSION_MAX_AGE, httponly=True, secure=settings.cookie_secure, samesite="lax")
     response.set_cookie("filaflow_csrf", csrf, max_age=SESSION_MAX_AGE, httponly=False, secure=settings.cookie_secure, samesite="lax")
     return csrf
@@ -77,6 +77,10 @@ def current_user(
     user = db.get(User, uuid.UUID(payload["uid"]))
     if not user or not user.active:
         raise HTTPException(401, "User is not active")
+    if int(payload.get("av", 0)) != user.auth_version:
+        raise HTTPException(401, "Session expired")
+    if user.must_change_password and request.url.path not in {"/api/auth/me", "/api/account/password"}:
+        raise HTTPException(403, "Password change required")
     if request.method not in {"GET", "HEAD", "OPTIONS"}:
         csrf_header = request.headers.get("x-csrf-token")
         csrf_cookie = request.cookies.get("filaflow_csrf")

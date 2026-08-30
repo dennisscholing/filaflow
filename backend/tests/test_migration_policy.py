@@ -33,3 +33,11 @@ def test_v030_schema_changes_are_additive():
     assert '"reorder_rules"' in upgrade
     assert "drop_" not in upgrade
     assert "alter_column" not in upgrade
+
+
+def test_v050_password_schema_change_is_additive():
+    source = (BACKEND / "alembic" / "versions" / "0006_user_password_security.py").read_text(encoding="utf-8")
+    upgrade = source.split("def downgrade", 1)[0]
+    assert upgrade.count('op.add_column("users"') == 2
+    assert "drop_" not in upgrade
+    assert "alter_column" not in upgrade

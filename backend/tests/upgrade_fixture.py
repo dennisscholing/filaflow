@@ -97,9 +97,11 @@ def seed() -> None:
 
 
 def verify() -> None:
-    tables = reflected("printers", "printer_tools", "spools", "api_tokens", "print_jobs", "inventory_entries", "label_templates", "inventory_settings")
+    tables = reflected("users", "printers", "printer_tools", "spools", "api_tokens", "print_jobs", "inventory_entries", "label_templates", "inventory_settings")
     with engine.connect() as connection:
-        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0005_indx_t0_t7"
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0006_user_password_security"
+        migrated_user = connection.execute(select(tables["users"].c.must_change_password, tables["users"].c.auth_version).where(tables["users"].c.id == identifier(USER_ID))).one()
+        assert migrated_user == (False, 0)
         printer = connection.execute(select(tables["printers"].c.id, tables["printers"].c.code, tables["printers"].c.location).where(tables["printers"].c.id == identifier(PRINTER_ID))).one()
         assert (normalized_identifier(printer.id), printer.code, printer.location) == (PRINTER_ID, "PRN-0001", "")
         tools = connection.execute(select(tables["printer_tools"].c.slicer_index, tables["printer_tools"].c.label).where(tables["printer_tools"].c.printer_id == identifier(PRINTER_ID)).order_by(tables["printer_tools"].c.slicer_index)).all()

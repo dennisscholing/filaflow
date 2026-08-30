@@ -23,6 +23,8 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(Text)
     role: Mapped[str] = mapped_column(String(20), default="operator")
     preferred_unit: Mapped[str] = mapped_column(String(10), default="both")
+    must_change_password: Mapped[bool] = mapped_column(Boolean, default=False)
+    auth_version: Mapped[int] = mapped_column(Integer, default=0)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
 
