@@ -1477,6 +1477,7 @@ function SpoolsView({
         onUpdated={async () => { setEditingSpool(null); await onRefresh(); }}
       />
       <RepurposeSpoolDialog
+        key={repurposeSpool?.id ?? 'closed'}
         spool={repurposeSpool}
         open={!!repurposeSpool}
         onOpenChange={(open) => !open && setRepurposeSpool(null)}
@@ -2752,10 +2753,10 @@ function EditSpoolDialog({ spool, open, onOpenChange, onUpdated }: { spool: Spoo
       <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-2xl">
         <DialogHeader><DialogTitle>Edit {spool?.code}</DialogTitle><DialogDescription className="sr-only">Edit spool metadata.</DialogDescription></DialogHeader>
         {spool && <form key={spool.id} onSubmit={submit} className="grid gap-4 sm:grid-cols-2">
-          <Field label="Brand" name="brand" defaultValue="Generic" required />
-          <Field label="Material name" name="materialName" required />
-          <Field label="Material type" name="materialType" defaultValue="PLA" required />
-          <ColorInputs />
+          <Field label="Brand" name="brand" defaultValue={spool.brand} required />
+          <Field label="Material name" name="materialName" defaultValue={spool.materialName} required />
+          <Field label="Material type" name="materialType" defaultValue={spool.materialType} required />
+          <ColorInputs defaultName={spool.colorName} defaultHex={spool.colorHex} />
           <LocationField defaultValue={spool.location} />
           <Field label="Spool serial number" name="serialNumber" defaultValue={spool.serialNumber} />
           <Field label="Lot number" name="lotNumber" defaultValue={spool.lotNumber} />
@@ -2963,6 +2964,29 @@ function RepurposeSpoolDialog({
 }) {
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
+  const [query, setQuery] = useState('');
+  const [catalog, setCatalog] = useState<CatalogItem[]>([]);
+  const [picked, setPicked] = useState<CatalogItem | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [searched, setSearched] = useState(false);
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (query.trim().length >= 2 && !picked) {
+        setSearching(true);
+        api<CatalogItem[]>(`/api/catalog/search?q=${encodeURIComponent(query)}&limit=60`)
+          .then((items) => {
+            setCatalog(items);
+            setSearched(true);
+          })
+          .catch(() => setCatalog([]))
+          .finally(() => setSearching(false));
+      } else if (query.trim().length < 2) {
+        setCatalog([]);
+        setSearched(false);
+      }
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [picked, query]);
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!spool) return;
@@ -2986,10 +3010,18 @@ function RepurposeSpoolDialog({
           density_g_cm3: Number(f.get('density')),
           tare_weight_g: Number(f.get('tareWeightG')),
           initial_weight_g: Number(f.get('initialWeightG')),
+          initial_length_m: f.get('initialLengthM') ? Number(f.get('initialLengthM')) : null,
           low_stock_weight_g: Number(f.get('lowStockWeightG')),
           purchase_price: f.get('purchasePrice') ? Number(f.get('purchasePrice')) : null,
           currency: typeof f.get('currency') === 'string' ? (f.get('currency') as string).toUpperCase() : 'EUR',
           note: 'Restored and repurposed after an incorrect setup entry',
+          ...(picked ? {
+            opt_brand_uuid: picked.opt.brandUuid,
+            opt_material_uuid: picked.opt.materialUuid,
+            opt_package_uuid: picked.opt.packageUuid,
+            opt_container_uuid: picked.opt.containerUuid,
+            catalog_snapshot: picked.raw,
+          } : {}),
         }),
       });
       await onUpdated();
@@ -3008,18 +3040,59 @@ function RepurposeSpoolDialog({
             Reassign this inactive setup record to a different physical spool. Its code and internal ID stay unchanged. This is blocked when print-job history exists.
           </DialogDescription>
         </DialogHeader>
-        {spool && <form key={spool.id} onSubmit={submit} className="grid gap-4 sm:grid-cols-2">
-          <Field label="Brand" name="brand" defaultValue={spool.brand} required />
-          <Field label="Material name" name="materialName" defaultValue={spool.materialName} required />
-          <Field label="Material type" name="materialType" defaultValue={spool.materialType} required />
-          <ColorInputs defaultName={spool.colorName} defaultHex={spool.colorHex} />
+        <div className="space-y-2">
+          <Label htmlFor="repurpose-catalog-search">Search OpenPrintTag</Label>
+          <Input
+            id="repurpose-catalog-search"
+            value={query}
+            onChange={(event) => {
+              setQuery(event.target.value);
+              setPicked(null);
+            }}
+            placeholder="Brand, material, color, tag or GTIN"
+          />
+          {searching && <p className="text-xs text-muted-foreground">Searching…</p>}
+          {catalog.length > 0 && !picked && <div className="max-h-64 overflow-auto rounded-xl border p-1">
+            {catalog.map((item) => <button
+              key={item.id}
+              type="button"
+              aria-label={`Select ${item.brand} ${item.materialName}`}
+              onClick={() => {
+                setPicked(item);
+                setQuery(`${item.brand} ${item.materialName}`);
+                setCatalog([]);
+              }}
+              className="flex w-full items-center gap-3 rounded-lg p-2 text-left hover:bg-muted"
+            >
+              <span className="size-7 shrink-0 rounded-lg border" style={{ background: item.colorHex }} />
+              <div className="min-w-0">
+                <p className="truncate text-sm font-semibold">{item.brand} · {item.materialName}</p>
+                <p className="text-xs text-muted-foreground">{item.materialType} · {item.nominalWeightG ?? '?'} g · {item.colorHex.toUpperCase()}{item.gtin ? ` · GTIN ${item.gtin}` : ''}</p>
+              </div>
+            </button>)}
+          </div>}
+          {!searching && searched && catalog.length === 0 && !picked && <p className="text-xs text-muted-foreground">No matching OpenPrintTag material found. Try fewer words or enter the spool manually.</p>}
+          {picked && <div className="flex items-center justify-between rounded-xl border bg-muted/40 px-3 py-2">
+            <div className="flex min-w-0 items-center gap-2">
+              <span className="size-6 shrink-0 rounded-md border" style={{ background: picked.colorHex }} />
+              <p className="truncate text-sm font-semibold">{picked.brand} · {picked.materialName}</p>
+            </div>
+            <Button type="button" size="sm" variant="ghost" onClick={() => { setPicked(null); setQuery(''); }}>Clear</Button>
+          </div>}
+        </div>
+        {spool && <form key={`${spool.id}-${picked?.id ?? 'manual'}`} onSubmit={submit} className="grid gap-4 sm:grid-cols-2">
+          <Field label="Brand" name="brand" defaultValue={picked?.brand ?? 'Generic'} required />
+          <Field label="Material name" name="materialName" defaultValue={picked?.materialName ?? ''} required />
+          <Field label="Material type" name="materialType" defaultValue={picked?.materialType ?? 'PLA'} required />
+          <ColorInputs defaultName={picked?.colorName ?? ''} defaultHex={picked?.colorHex ?? '#808080'} />
           <LocationField defaultValue={spool.location} />
           <Field label="Spool serial number" name="serialNumber" defaultValue="" />
           <Field label="Lot number" name="lotNumber" defaultValue="" />
-          <Field label="Current filament weight (g)" name="initialWeightG" type="number" min="0" step="0.1" required />
-          <Field label="Spool tare (g)" name="tareWeightG" type="number" min="0" step="0.1" defaultValue={0} required />
-          <Field label="Diameter (mm)" name="diameterMm" type="number" min="0.001" step="0.001" defaultValue={1.75} required />
-          <Field label="Density (g/cm³)" name="density" type="number" min="0.0001" step="0.0001" defaultValue={1.24} required />
+          <Field label="Current filament weight (g)" name="initialWeightG" type="number" min="0" step="0.1" defaultValue={picked?.nominalWeightG ?? ''} required />
+          <Field label="Current length (m, optional)" name="initialLengthM" type="number" min="0" step="0.001" defaultValue={picked?.nominalLengthM ?? ''} />
+          <Field label="Spool tare (g)" name="tareWeightG" type="number" min="0" step="0.1" defaultValue={picked?.tareWeightG ?? 0} required />
+          <Field label="Diameter (mm)" name="diameterMm" type="number" min="0.001" step="0.001" defaultValue={picked?.diameterMm ?? 1.75} required />
+          <Field label="Density (g/cm³)" name="density" type="number" min="0.0001" step="0.0001" defaultValue={picked?.density ?? 1.24} required />
           <Field label="Low-stock threshold (g)" name="lowStockWeightG" type="number" min="0" step="1" defaultValue={100} required />
           <Field label="Purchase price" name="purchasePrice" type="number" min="0" step="0.01" defaultValue="" />
           <Field label="Currency" name="currency" maxLength={3} defaultValue="EUR" required />

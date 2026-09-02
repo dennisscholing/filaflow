@@ -37,7 +37,7 @@ from .schemas import AdminPasswordResetInput, InventorySettingsInput, JobBookInp
 from .units import grams_to_mg, length_mm_to_weight_mg, mg_to_grams, weight_mg_to_length_mm
 
 
-app = FastAPI(title="FilaFlow API", version="0.5.1", docs_url="/api/docs", redoc_url=None)
+app = FastAPI(title="FilaFlow API", version="0.5.2", docs_url="/api/docs", redoc_url=None)
 
 
 def spool_json(db: Session, spool: Spool) -> dict:
