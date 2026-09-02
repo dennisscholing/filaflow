@@ -541,6 +541,7 @@ export function FilaFlowApp() {
               <SpoolsView
                 spools={spools}
                 preference={user.preferredUnit}
+                isAdmin={user.role === 'admin'}
                 onRefresh={refresh}
                 onAdd={() => { setSpoolTemplate(null); setSpoolDialog(true); }}
                 onDuplicate={(spool) => { setSpoolTemplate(spool); setSpoolDialog(true); }}
@@ -1081,12 +1082,14 @@ function Empty({ text }: { text: string }) {
 function SpoolsView({
   spools,
   preference,
+  isAdmin,
   onRefresh,
   onAdd,
   onDuplicate,
 }: {
   spools: Spool[];
   preference: User['preferredUnit'];
+  isAdmin: boolean;
   onRefresh: () => Promise<void>;
   onAdd: () => void;
   onDuplicate: (spool: Spool) => void;
@@ -1096,6 +1099,7 @@ function SpoolsView({
   const [weigh, setWeigh] = useState<Spool | null>(null);
   const [emptySpool, setEmptySpool] = useState<Spool | null>(null);
   const [editingSpool, setEditingSpool] = useState<Spool | null>(null);
+  const [repurposeSpool, setRepurposeSpool] = useState<Spool | null>(null);
   const [archivedSpools, setArchivedSpools] = useState<Spool[]>([]);
   const [showArchived, setShowArchived] = useState(false);
   const [loadingArchived, setLoadingArchived] = useState(false);
@@ -1420,6 +1424,7 @@ function SpoolsView({
                 <DropdownMenuItem onClick={() => onDuplicate(spool)}><Copy className="size-4" /> Duplicate</DropdownMenuItem>
                 <DropdownMenuItem onClick={() => window.open(`/labels/print?spools=${spool.id}`, '_blank')}><Download className="size-4" /> Label</DropdownMenuItem>
                 {!spool.archived && <DropdownMenuItem className="text-destructive" onClick={() => setEmptySpool(spool)}><Archive className="size-4" /> Empty</DropdownMenuItem>}
+                {spool.archived && isAdmin && <DropdownMenuItem onClick={() => setRepurposeSpool(spool)}><RotateCcw className="size-4" /> Restore &amp; repurpose</DropdownMenuItem>}
               </DropdownMenuContent></DropdownMenu>
             </div>
           </article>
@@ -1429,12 +1434,14 @@ function SpoolsView({
         <table className="w-full min-w-[980px] text-sm"><thead className="border-b bg-muted/40 text-left text-xs text-muted-foreground"><tr>
           <th className="p-3"><input aria-label="Select all shown spools" type="checkbox" checked={tableRows.length > 0 && tableRows.every((row) => selectedIds.has(row.id))} onChange={(event) => setSelectedIds(event.target.checked ? new Set(tableRows.map((row) => row.id)) : new Set())} /></th>
           {SPOOL_COLUMNS.filter((column) => columns.has(column.key)).map((column) => <th key={column.key} className="p-3 font-semibold"><button type="button" onClick={() => sortTable(column.key)} className="inline-flex items-center gap-1 hover:text-foreground">{column.label}{tableSort.key === column.key ? (tableSort.direction === 'asc' ? ' ↑' : ' ↓') : ''}</button></th>)}
+          {showArchived && isAdmin && <th className="p-3 font-semibold">Actions</th>}
         </tr></thead><tbody className="divide-y">{tableRows.map((spool) => <tr key={spool.id} className="hover:bg-muted/40">
           <td className="p-3" onClick={(event) => event.stopPropagation()}><input aria-label={`Select ${spool.code}`} type="checkbox" checked={selectedIds.has(spool.id)} onChange={(event) => setSelectedIds((current) => { const next = new Set(current); if (event.target.checked) next.add(spool.id); else next.delete(spool.id); return next; })} /></td>
           {columns.has('code') && <td className="p-3 font-mono font-semibold"><button onClick={() => setSelectedSpool(spool)} className="underline-offset-2 hover:underline">{spool.code}</button></td>}{columns.has('color') && <td className="p-3"><span aria-label={spool.colorName} className="block size-6 rounded-md border" style={{ background: spool.colorHex }} /></td>}
           {columns.has('brand') && <td className="p-3 font-semibold">{spool.brand}</td>}{columns.has('filament') && <td className="p-3">{spool.materialName}</td>}{columns.has('material') && <td className="p-3">{spool.materialType}</td>}
           {columns.has('remaining') && <td className="p-3">{formatInventory(spool.remainingWeightG, spool.remainingLengthM, preference)}</td>}{columns.has('reserved') && <td className="p-3">{formatInventory(spool.reservedWeightG, spool.reservedLengthM, preference)}</td>}{columns.has('available') && <td className="p-3 font-semibold">{formatInventory(spool.availableWeightG, spool.availableLengthM, preference)}</td>}
           {columns.has('location') && <td className="p-3">{spool.location || '—'}</td>}{columns.has('loadout') && <td className="p-3">{spool.loadedOn ? `${spool.loadedOn.printerCode} · ${spool.loadedOn.tool}` : 'Unloaded'}</td>}{columns.has('status') && <td className="p-3">{spool.lowStock ? <Badge variant="outline">Low</Badge> : <Badge variant="secondary">Available</Badge>}</td>}
+          {showArchived && isAdmin && <td className="p-3"><Button size="sm" variant="outline" onClick={() => setRepurposeSpool(spool)}><RotateCcw className="size-3.5" /> Restore</Button></td>}
         </tr>)}</tbody></table>{!filtered.length && <Empty text="No spools found." />}
       </div>}
       <Button
@@ -1468,6 +1475,16 @@ function SpoolsView({
         open={!!editingSpool}
         onOpenChange={(open) => !open && setEditingSpool(null)}
         onUpdated={async () => { setEditingSpool(null); await onRefresh(); }}
+      />
+      <RepurposeSpoolDialog
+        spool={repurposeSpool}
+        open={!!repurposeSpool}
+        onOpenChange={(open) => !open && setRepurposeSpool(null)}
+        onUpdated={async () => {
+          setRepurposeSpool(null);
+          setShowArchived(false);
+          await onRefresh();
+        }}
       />
       <SpoolDetailSheet spool={selectedSpool} open={!!selectedSpool} onOpenChange={(open) => !open && setSelectedSpool(null)} preference={preference} />
     </div>
@@ -2735,10 +2752,10 @@ function EditSpoolDialog({ spool, open, onOpenChange, onUpdated }: { spool: Spoo
       <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-2xl">
         <DialogHeader><DialogTitle>Edit {spool?.code}</DialogTitle><DialogDescription className="sr-only">Edit spool metadata.</DialogDescription></DialogHeader>
         {spool && <form key={spool.id} onSubmit={submit} className="grid gap-4 sm:grid-cols-2">
-          <Field label="Brand" name="brand" defaultValue={spool.brand} required />
-          <Field label="Material name" name="materialName" defaultValue={spool.materialName} required />
-          <Field label="Material type" name="materialType" defaultValue={spool.materialType} required />
-          <ColorInputs defaultName={spool.colorName} defaultHex={spool.colorHex} />
+          <Field label="Brand" name="brand" defaultValue="Generic" required />
+          <Field label="Material name" name="materialName" required />
+          <Field label="Material type" name="materialType" defaultValue="PLA" required />
+          <ColorInputs />
           <LocationField defaultValue={spool.location} />
           <Field label="Spool serial number" name="serialNumber" defaultValue={spool.serialNumber} />
           <Field label="Lot number" name="lotNumber" defaultValue={spool.lotNumber} />
@@ -2928,6 +2945,94 @@ function WeighDialog({
             </Button>
           </DialogFooter>
         </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function RepurposeSpoolDialog({
+  spool,
+  open,
+  onOpenChange,
+  onUpdated,
+}: {
+  spool: Spool | null;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onUpdated: () => Promise<void>;
+}) {
+  const [error, setError] = useState('');
+  const [saving, setSaving] = useState(false);
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!spool) return;
+    const f = new FormData(event.currentTarget);
+    setSaving(true);
+    setError('');
+    try {
+      await api(`/api/spools/${spool.id}/restore-and-repurpose`, {
+        method: 'POST',
+        body: JSON.stringify({
+          confirmation: 'RESTORE_AND_REPURPOSE',
+          brand: f.get('brand'),
+          material_name: f.get('materialName'),
+          material_type: f.get('materialType'),
+          color_name: f.get('colorName'),
+          color_hex: f.get('colorHex'),
+          location: f.get('location'),
+          lot_number: f.get('lotNumber'),
+          serial_number: f.get('serialNumber'),
+          diameter_mm: Number(f.get('diameterMm')),
+          density_g_cm3: Number(f.get('density')),
+          tare_weight_g: Number(f.get('tareWeightG')),
+          initial_weight_g: Number(f.get('initialWeightG')),
+          low_stock_weight_g: Number(f.get('lowStockWeightG')),
+          purchase_price: f.get('purchasePrice') ? Number(f.get('purchasePrice')) : null,
+          currency: typeof f.get('currency') === 'string' ? (f.get('currency') as string).toUpperCase() : 'EUR',
+          note: 'Restored and repurposed after an incorrect setup entry',
+        }),
+      });
+      await onUpdated();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Restore failed');
+    } finally {
+      setSaving(false);
+    }
+  }
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>Restore &amp; repurpose {spool?.code}</DialogTitle>
+          <DialogDescription>
+            Reassign this inactive setup record to a different physical spool. Its code and internal ID stay unchanged. This is blocked when print-job history exists.
+          </DialogDescription>
+        </DialogHeader>
+        {spool && <form key={spool.id} onSubmit={submit} className="grid gap-4 sm:grid-cols-2">
+          <Field label="Brand" name="brand" defaultValue={spool.brand} required />
+          <Field label="Material name" name="materialName" defaultValue={spool.materialName} required />
+          <Field label="Material type" name="materialType" defaultValue={spool.materialType} required />
+          <ColorInputs defaultName={spool.colorName} defaultHex={spool.colorHex} />
+          <LocationField defaultValue={spool.location} />
+          <Field label="Spool serial number" name="serialNumber" defaultValue="" />
+          <Field label="Lot number" name="lotNumber" defaultValue="" />
+          <Field label="Current filament weight (g)" name="initialWeightG" type="number" min="0" step="0.1" required />
+          <Field label="Spool tare (g)" name="tareWeightG" type="number" min="0" step="0.1" defaultValue={0} required />
+          <Field label="Diameter (mm)" name="diameterMm" type="number" min="0.001" step="0.001" defaultValue={1.75} required />
+          <Field label="Density (g/cm³)" name="density" type="number" min="0.0001" step="0.0001" defaultValue={1.24} required />
+          <Field label="Low-stock threshold (g)" name="lowStockWeightG" type="number" min="0" step="1" defaultValue={100} required />
+          <Field label="Purchase price" name="purchasePrice" type="number" min="0" step="0.01" defaultValue="" />
+          <Field label="Currency" name="currency" maxLength={3} defaultValue="EUR" required />
+          <label className="flex items-start gap-2 rounded-xl border bg-muted/40 p-3 text-sm sm:col-span-2">
+            <input className="mt-0.5" type="checkbox" required />
+            <span>I understand that {spool.code} keeps its existing audit and inventory ledger.</span>
+          </label>
+          {error && <p className="text-sm text-destructive sm:col-span-2">{error}</p>}
+          <DialogFooter className="sm:col-span-2">
+            <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
+            <Button type="submit" disabled={saving}><RotateCcw className="size-4" /> {saving ? 'Restoring…' : 'Restore & repurpose'}</Button>
+          </DialogFooter>
+        </form>}
       </DialogContent>
     </Dialog>
   );

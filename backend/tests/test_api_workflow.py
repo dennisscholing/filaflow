@@ -116,6 +116,40 @@ def test_edit_route_book_and_analyse_workflow():
         detail = client.get(f"/api/spools/{original['id']}")
         assert detail.json()["ledger"][0]["kind"] == "MANUAL_CONSUMPTION"
 
+        mistaken_response = client.post(
+            "/api/spools",
+            headers=csrf,
+            json={
+                "brand": "Wrong brand",
+                "material_name": "Mistaken setup entry",
+                "material_type": "PLA",
+                "initial_weight_g": 1000,
+            },
+        )
+        assert mistaken_response.status_code == 201, mistaken_response.text
+        mistaken = mistaken_response.json()
+        assert client.post(f"/api/spools/{mistaken['id']}/archive", headers=csrf).status_code == 200
+        repurposed = client.post(
+            f"/api/spools/{mistaken['id']}/restore-and-repurpose",
+            headers=csrf,
+            json={
+                "confirmation": "RESTORE_AND_REPURPOSE",
+                "brand": "New brand",
+                "material_name": "Blue PETG",
+                "material_type": "PETG",
+                "color_hex": "#0055FF",
+                "location": "Shelf A",
+                "initial_weight_g": 735.5,
+            },
+        )
+        assert repurposed.status_code == 200, repurposed.text
+        assert repurposed.json()["code"] == mistaken["code"]
+        assert repurposed.json()["brand"] == "New brand"
+        assert repurposed.json()["remainingWeightG"] == 735.5
+        assert repurposed.json()["archived"] is False
+        repurposed_detail = client.get(f"/api/spools/{mistaken['id']}").json()
+        assert repurposed_detail["ledger"][0]["kind"] == "REPURPOSED"
+
         colors = client.get("/api/colors/nearest", params={"hex": "#FF0505"})
         locations = client.get("/api/locations")
         assert colors.json()["name"] == "Red"
@@ -236,6 +270,20 @@ def test_edit_route_book_and_analyse_workflow():
         assert mismatch.json()["usages"][0]["toolIndex"] == 0
         assert mismatch.json()["usages"][0]["toolLabel"] == "T1"
         assert not any("No matching tool" in warning for warning in mismatch.json()["warnings"])
+
+        assert client.post(f"/api/spools/{original['id']}/archive", headers=csrf).status_code == 200
+        history_protected = client.post(
+            f"/api/spools/{original['id']}/restore-and-repurpose",
+            headers=csrf,
+            json={
+                "confirmation": "RESTORE_AND_REPURPOSE",
+                "brand": "Should not replace history",
+                "material_name": "Protected spool",
+                "material_type": "PLA",
+                "initial_weight_g": 500,
+            },
+        )
+        assert history_protected.status_code == 409
 
 
 def test_v030_preferences_revision_labels_reorder_and_quick_booking():

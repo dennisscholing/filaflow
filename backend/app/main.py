@@ -33,11 +33,11 @@ from .gcode import parse_gcode
 from .ids import next_code
 from .labels import DEFAULT_LAYOUT, render_label, template_json, validate_layout
 from .models import ApiToken, AuditEvent, CatalogMaterial, CatalogSnapshot, InventoryEntry, InventorySetting, JobUsage, LabelTemplate, PrintJob, Printer, PrinterTool, ReorderRule, Spool, User, now_utc
-from .schemas import AdminPasswordResetInput, InventorySettingsInput, JobBookInput, JobMapInput, JobPrinterInput, LabelTemplateInput, LoadoutInput, LoginInput, PasswordChangeInput, PrinterInput, PrinterUpdateInput, ReorderRuleInput, SpoolInput, SpoolUpdateInput, TokenInput, UserCreateInput, UserPreferenceInput, UserStatusInput, WeighInput
+from .schemas import AdminPasswordResetInput, InventorySettingsInput, JobBookInput, JobMapInput, JobPrinterInput, LabelTemplateInput, LoadoutInput, LoginInput, PasswordChangeInput, PrinterInput, PrinterUpdateInput, ReorderRuleInput, SpoolInput, SpoolRepurposeInput, SpoolUpdateInput, TokenInput, UserCreateInput, UserPreferenceInput, UserStatusInput, WeighInput
 from .units import grams_to_mg, length_mm_to_weight_mg, mg_to_grams, weight_mg_to_length_mm
 
 
-app = FastAPI(title="FilaFlow API", version="0.5.0", docs_url="/api/docs", redoc_url=None)
+app = FastAPI(title="FilaFlow API", version="0.5.1", docs_url="/api/docs", redoc_url=None)
 
 
 def spool_json(db: Session, spool: Spool) -> dict:
@@ -535,6 +535,108 @@ def archive_spool(spool_id: uuid.UUID, db: Session = Depends(get_db), user: User
     if not spool: raise HTTPException(404, "Spool not found")
     db.query(PrinterTool).filter(PrinterTool.loaded_spool_id == spool.id).update({PrinterTool.loaded_spool_id: None})
     spool.archived = True; audit(db, user, "spool.archived", "spool", spool.id); db.commit(); return {"ok": True}
+
+
+@app.post("/api/spools/{spool_id}/restore-and-repurpose")
+def restore_and_repurpose_spool(
+    spool_id: uuid.UUID,
+    data: SpoolRepurposeInput,
+    db: Session = Depends(get_db),
+    user: User = Depends(admin_user),
+):
+    """Reuse an inactive setup record only when it has no print history."""
+    spool = db.get(Spool, spool_id, with_for_update=True)
+    if not spool:
+        raise HTTPException(404, "Spool not found")
+    if not spool.archived:
+        raise HTTPException(409, "Only an inactive spool can be restored and repurposed")
+
+    print_ledger_entries = db.scalar(
+        select(func.count()).select_from(InventoryEntry).where(
+            InventoryEntry.spool_id == spool.id,
+            or_(InventoryEntry.job_id.is_not(None), InventoryEntry.kind == "PRINT"),
+        )
+    ) or 0
+    job_references = db.scalar(
+        select(func.count()).select_from(JobUsage).where(
+            or_(JobUsage.mapped_spool_id == spool.id, JobUsage.suggested_spool_id == spool.id)
+        )
+    ) or 0
+    if print_ledger_entries or job_references:
+        raise HTTPException(
+            409,
+            "This spool has print-job history and cannot be repurposed. Restore it as the same physical spool instead.",
+        )
+
+    if not data.brand.strip() or not data.material_name.strip() or not data.material_type.strip():
+        raise HTTPException(422, "Brand, material name, and material type are required")
+
+    previous = {
+        "brand": spool.brand,
+        "materialName": spool.material_name,
+        "materialType": spool.material_type,
+        "remainingWeightMg": spool.remaining_weight_mg,
+    }
+    target_weight_mg = grams_to_mg(data.initial_weight_g)
+    target_length_mm = (
+        data.initial_length_m * 1000
+        if data.initial_length_m is not None
+        else weight_mg_to_length_mm(target_weight_mg, data.diameter_mm, data.density_g_cm3)
+    )
+    if target_weight_mg < 0 or target_length_mm < 0:
+        raise HTTPException(422, "Current filament inventory cannot be negative")
+    delta_weight = target_weight_mg - spool.remaining_weight_mg
+    delta_length = target_length_mm - spool.remaining_length_mm
+
+    spool.brand = data.brand.strip()
+    spool.material_name = data.material_name.strip()
+    spool.material_type = data.material_type.strip()
+    spool.color_name = data.color_name.strip() or nearest_color(data.color_hex)[0]
+    spool.color_hex = data.color_hex
+    spool.location = data.location.strip()
+    spool.lot_number = data.lot_number.strip()
+    spool.serial_number = data.serial_number.strip()
+    spool.diameter_mm = data.diameter_mm
+    spool.density_g_cm3 = data.density_g_cm3
+    spool.tare_weight_mg = grams_to_mg(data.tare_weight_g)
+    spool.initial_weight_mg = target_weight_mg
+    spool.remaining_weight_mg = target_weight_mg
+    spool.initial_length_mm = target_length_mm
+    spool.remaining_length_mm = target_length_mm
+    spool.low_stock_weight_mg = grams_to_mg(data.low_stock_weight_g)
+    spool.purchase_price_cents = int(data.purchase_price * 100) if data.purchase_price is not None else None
+    spool.currency = data.currency.strip().upper()
+    spool.opt_brand_uuid = uuid.UUID(data.opt_brand_uuid) if data.opt_brand_uuid else None
+    spool.opt_material_uuid = uuid.UUID(data.opt_material_uuid) if data.opt_material_uuid else None
+    spool.opt_package_uuid = uuid.UUID(data.opt_package_uuid) if data.opt_package_uuid else None
+    spool.opt_container_uuid = uuid.UUID(data.opt_container_uuid) if data.opt_container_uuid else None
+    spool.catalog_snapshot = data.catalog_snapshot
+    spool.archived = False
+    spool.discrepancy = False
+    db.add(InventoryEntry(
+        spool_id=spool.id,
+        kind="REPURPOSED",
+        weight_delta_mg=delta_weight,
+        length_delta_mm=delta_length,
+        diameter_mm=spool.diameter_mm,
+        density_g_cm3=spool.density_g_cm3,
+        note=data.note,
+        actor_id=user.id,
+    ))
+    audit(db, user, "spool.restored_and_repurposed", "spool", spool.id, {
+        "code": spool.code,
+        "previous": previous,
+        "new": {
+            "brand": spool.brand,
+            "materialName": spool.material_name,
+            "materialType": spool.material_type,
+            "remainingWeightMg": spool.remaining_weight_mg,
+        },
+        "weightDeltaMg": delta_weight,
+        "lengthDeltaMm": str(delta_length),
+    })
+    db.commit()
+    return spool_json(db, spool)
 
 
 @app.post("/api/spools/{spool_id}/empty")

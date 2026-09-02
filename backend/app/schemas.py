@@ -106,6 +106,11 @@ class SpoolUpdateInput(BaseModel):
         return value.strip().upper()
 
 
+class SpoolRepurposeInput(SpoolInput):
+    confirmation: Literal["RESTORE_AND_REPURPOSE"]
+    note: str = Field(default="Restored and repurposed after an incorrect setup entry", max_length=500)
+
+
 class WeighInput(BaseModel):
     total_weight_g: Decimal | None = None
     net_weight_g: Decimal | None = None
