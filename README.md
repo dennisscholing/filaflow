@@ -13,6 +13,7 @@ FilaFlow never controls, pauses, approves, or blocks a print. The PrusaSlicer ho
 - Print inbox with `NEW`, `MAPPED`, `NEEDS_REVIEW`, `BOOKED`, and `DISMISSED` states.
 - Regular G-code and binary `.bgcode` through the official libbgcode CLI.
 - OpenPrintTag catalog synchronization plus fully manual materials.
+- Shared wishlist for OpenPrintTag or manual filament, with Saved and Buy soon states and atomic conversion into a real spool.
 - Editable spool and printer metadata, offline color-name suggestions, and real 30-day usage in grams and metres.
 - Silent five-second refresh, attention indicators, available-stock reorder suggestions, and per-user unit preferences.
 - Dashboard reservations include all open inbox jobs, with mapped and unassigned estimates shown separately.
@@ -53,7 +54,14 @@ The Compose file follows `latest`, so no version needs to be edited. Synology Co
 
 Before a schema update, FilaFlow takes a PostgreSQL custom-format dump, validates it with `pg_restore`, writes a SHA-256 checksum, and only then runs the migration. Startup stops safely if the backup mount is missing, the revision is unknown, or migration verification fails. A manual backup before maintenance remains recommended.
 
-For v0.3.0, update manually in Synology as described in the guide. Existing users, spool IDs, ledger entries, jobs, tools, and loadouts are retained; the migration only adds label-template and reorder-setting tables.
+The v0.6.0 migration only adds the `wishlist_items` table. Existing users, spool IDs, ledger entries, jobs, tools, loadouts, and inventory totals are not rewritten.
+
+## Wishlist
+
+- **Saved** keeps a filament for later; **Buy soon** adds it to the shared shopping list.
+- Search the same OpenPrintTag catalog used by **Add spool**, or enter a filament manually.
+- Wishlist entries never affect remaining, reserved, available, low-stock, or reorder calculations.
+- **Add spool** creates the new spool and initial ledger entry and archives the wishlist entry in one database transaction.
 
 ## Labels and reorder suggestions
 

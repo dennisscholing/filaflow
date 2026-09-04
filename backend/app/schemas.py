@@ -1,3 +1,4 @@
+import uuid
 from decimal import Decimal
 from typing import Literal
 
@@ -181,6 +182,44 @@ class ReorderRuleInput(BaseModel):
     threshold_g: Decimal | None = Field(default=None, ge=0, le=100_000)
     ignored: bool = False
     product_snapshot: dict = Field(default_factory=dict)
+
+
+class WishlistInput(BaseModel):
+    status: Literal["saved", "buy_soon"] = "saved"
+    desired_quantity: int = Field(default=1, ge=1, le=99)
+    note: str = Field(default="", max_length=2000)
+    brand: str = Field(default="Generic", min_length=1, max_length=120)
+    material_name: str = Field(min_length=1, max_length=160)
+    material_type: str = Field(default="PLA", min_length=1, max_length=40)
+    color_name: str = Field(default="", max_length=80)
+    color_hex: str = "#808080"
+    diameter_mm: Decimal = Field(default=Decimal("1.75"), gt=0)
+    density_g_cm3: Decimal = Field(default=Decimal("1.24"), gt=0)
+    nominal_weight_g: Decimal | None = Field(default=None, ge=0)
+    nominal_length_m: Decimal | None = Field(default=None, ge=0)
+    tare_weight_g: Decimal | None = Field(default=None, ge=0)
+    opt_brand_uuid: uuid.UUID | None = None
+    opt_material_uuid: uuid.UUID | None = None
+    opt_package_uuid: uuid.UUID | None = None
+    opt_container_uuid: uuid.UUID | None = None
+    catalog_snapshot: dict = Field(default_factory=dict)
+
+    @field_validator("color_hex")
+    @classmethod
+    def valid_hex(cls, value: str) -> str:
+        return SpoolInput.valid_hex(value)
+
+    @field_validator("brand", "material_name", "material_type")
+    @classmethod
+    def clean_wishlist_required_text(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Value cannot be empty")
+        return value
+
+
+class WishlistConvertInput(SpoolInput):
+    pass
 
 
 class LabelElementInput(BaseModel):

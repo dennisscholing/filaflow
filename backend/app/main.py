@@ -32,12 +32,12 @@ from .database import SessionLocal, get_db
 from .gcode import parse_gcode
 from .ids import next_code
 from .labels import DEFAULT_LAYOUT, render_label, template_json, validate_layout
-from .models import ApiToken, AuditEvent, CatalogMaterial, CatalogSnapshot, InventoryEntry, InventorySetting, JobUsage, LabelTemplate, PrintJob, Printer, PrinterTool, ReorderRule, Spool, User, now_utc
-from .schemas import AdminPasswordResetInput, InventorySettingsInput, JobBookInput, JobMapInput, JobPrinterInput, LabelTemplateInput, LoadoutInput, LoginInput, PasswordChangeInput, PrinterInput, PrinterUpdateInput, ReorderRuleInput, SpoolInput, SpoolRepurposeInput, SpoolUpdateInput, TokenInput, UserCreateInput, UserPreferenceInput, UserStatusInput, WeighInput
+from .models import ApiToken, AuditEvent, CatalogMaterial, CatalogSnapshot, InventoryEntry, InventorySetting, JobUsage, LabelTemplate, PrintJob, Printer, PrinterTool, ReorderRule, Spool, User, WishlistItem, now_utc
+from .schemas import AdminPasswordResetInput, InventorySettingsInput, JobBookInput, JobMapInput, JobPrinterInput, LabelTemplateInput, LoadoutInput, LoginInput, PasswordChangeInput, PrinterInput, PrinterUpdateInput, ReorderRuleInput, SpoolInput, SpoolRepurposeInput, SpoolUpdateInput, TokenInput, UserCreateInput, UserPreferenceInput, UserStatusInput, WeighInput, WishlistConvertInput, WishlistInput
 from .units import grams_to_mg, length_mm_to_weight_mg, mg_to_grams, weight_mg_to_length_mm
 
 
-app = FastAPI(title="FilaFlow API", version="0.5.2", docs_url="/api/docs", redoc_url=None)
+app = FastAPI(title="FilaFlow API", version="0.6.0", docs_url="/api/docs", redoc_url=None)
 
 
 def spool_json(db: Session, spool: Spool) -> dict:
@@ -105,6 +105,61 @@ def product_key(spool: Spool) -> str:
         return f"opt:{spool.opt_brand_uuid}:{spool.opt_material_uuid}:{diameter}"
     fields = (spool.brand, spool.material_name, spool.material_type, spool.color_hex, diameter)
     return "manual:" + "|".join(re.sub(r"\s+", " ", str(value).strip().casefold()) for value in fields)
+
+
+def wishlist_product_key(data: WishlistInput) -> str:
+    opt_ids = (data.opt_brand_uuid, data.opt_material_uuid, data.opt_package_uuid, data.opt_container_uuid)
+    if any(opt_ids):
+        return "opt:" + ":".join(str(value or "-").casefold() for value in opt_ids)
+    diameter = f"{Decimal(data.diameter_mm):.3f}"
+    fields = (data.brand, data.material_name, data.material_type, data.color_hex, diameter)
+    return "manual:" + "|".join(re.sub(r"\s+", " ", str(value).strip().casefold()) for value in fields)
+
+
+def wishlist_json(item: WishlistItem) -> dict:
+    return {
+        "id": str(item.id), "status": item.status, "desiredQuantity": item.desired_quantity, "note": item.note,
+        "brand": item.brand, "materialName": item.material_name, "materialType": item.material_type,
+        "colorName": item.color_name, "colorHex": item.color_hex, "diameterMm": float(item.diameter_mm),
+        "density": float(item.density_g_cm3),
+        "nominalWeightG": mg_to_grams(item.nominal_weight_mg) if item.nominal_weight_mg is not None else None,
+        "nominalLengthM": float(item.nominal_length_mm / 1000) if item.nominal_length_mm is not None else None,
+        "tareWeightG": mg_to_grams(item.tare_weight_mg) if item.tare_weight_mg is not None else None,
+        "catalogSnapshot": item.catalog_snapshot, "productKey": item.product_key, "archived": item.archived,
+        "openPrintTag": {
+            "brandUuid": str(item.opt_brand_uuid) if item.opt_brand_uuid else None,
+            "materialUuid": str(item.opt_material_uuid) if item.opt_material_uuid else None,
+            "packageUuid": str(item.opt_package_uuid) if item.opt_package_uuid else None,
+            "containerUuid": str(item.opt_container_uuid) if item.opt_container_uuid else None,
+        },
+        "createdAt": item.created_at.isoformat(), "updatedAt": item.updated_at.isoformat(),
+    }
+
+
+def apply_wishlist_input(item: WishlistItem, data: WishlistInput, user: User) -> None:
+    key = wishlist_product_key(data)
+    item.product_key = key
+    item.active_key = key
+    item.status = data.status
+    item.desired_quantity = data.desired_quantity
+    item.note = data.note.strip()
+    item.brand = data.brand.strip()
+    item.material_name = data.material_name.strip()
+    item.material_type = data.material_type.strip()
+    item.color_name = data.color_name.strip() or nearest_color(data.color_hex)[0]
+    item.color_hex = data.color_hex
+    item.diameter_mm = data.diameter_mm
+    item.density_g_cm3 = data.density_g_cm3
+    item.nominal_weight_mg = grams_to_mg(data.nominal_weight_g) if data.nominal_weight_g is not None else None
+    item.nominal_length_mm = data.nominal_length_m * 1000 if data.nominal_length_m is not None else None
+    item.tare_weight_mg = grams_to_mg(data.tare_weight_g) if data.tare_weight_g is not None else None
+    item.opt_brand_uuid = data.opt_brand_uuid
+    item.opt_material_uuid = data.opt_material_uuid
+    item.opt_package_uuid = data.opt_package_uuid
+    item.opt_container_uuid = data.opt_container_uuid
+    item.catalog_snapshot = data.catalog_snapshot
+    item.updated_by_id = user.id
+    item.updated_at = now_utc()
 
 
 def inventory_setting(db: Session) -> InventorySetting:
@@ -361,6 +416,118 @@ def update_reorder_rule(data: ReorderRuleInput, db: Session = Depends(get_db), u
     record.ignored, record.product_snapshot, record.updated_by_id, record.updated_at = data.ignored, data.product_snapshot, user.id, now_utc()
     db.flush(); audit(db, user, "inventory.reorder_rule_updated", "reorder_rule", record.id, {"productKey": record.product_key}); db.commit()
     return {"id": str(record.id), "productKey": record.product_key, "thresholdG": mg_to_grams(record.threshold_mg) if record.threshold_mg is not None else None, "ignored": record.ignored}
+
+
+@app.get("/api/wishlist")
+def list_wishlist(
+    q: str = "", status: str = "", brand: str = "", material: str = "", archived: bool = False,
+    db: Session = Depends(get_db), user: User = Depends(current_user),
+):
+    if status and status not in {"saved", "buy_soon"}:
+        raise HTTPException(422, "Unknown wishlist status")
+    statement = select(WishlistItem).where(WishlistItem.archived == archived)
+    searchable = (WishlistItem.brand, WishlistItem.material_name, WishlistItem.material_type, WishlistItem.color_name, WishlistItem.color_hex, WishlistItem.note)
+    for token in re.findall(r"[^\s]+", q.strip())[:12]:
+        needle = f"%{token}%"
+        statement = statement.where(or_(*(column.ilike(needle) for column in searchable)))
+    if status:
+        statement = statement.where(WishlistItem.status == status)
+    if brand:
+        statement = statement.where(func.lower(WishlistItem.brand) == brand.casefold())
+    if material:
+        statement = statement.where(func.lower(WishlistItem.material_type) == material.casefold())
+    rows = list(db.scalars(statement).all())
+    rows.sort(key=lambda row: (row.status != "buy_soon", -row.updated_at.timestamp(), row.brand.casefold(), row.material_name.casefold()))
+    return [wishlist_json(row) for row in rows]
+
+
+@app.post("/api/wishlist", status_code=201)
+def create_wishlist_item(data: WishlistInput, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    key = wishlist_product_key(data)
+    existing = db.scalar(select(WishlistItem).where(WishlistItem.active_key == key))
+    if existing:
+        raise HTTPException(409, f"This filament is already on the wishlist as {existing.brand} · {existing.material_name}")
+    item = WishlistItem(product_key=key, active_key=key, created_by_id=user.id, updated_by_id=user.id)
+    apply_wishlist_input(item, data, user)
+    db.add(item)
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(409, "This filament is already on the wishlist") from exc
+    audit(db, user, "wishlist.created", "wishlist_item", item.id, {"status": item.status, "productKey": item.product_key})
+    db.commit()
+    return wishlist_json(item)
+
+
+@app.put("/api/wishlist/{item_id}")
+def update_wishlist_item(item_id: uuid.UUID, data: WishlistInput, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    item = db.get(WishlistItem, item_id, with_for_update=True)
+    if not item or item.archived:
+        raise HTTPException(404, "Wishlist item not found")
+    key = wishlist_product_key(data)
+    duplicate = db.scalar(select(WishlistItem.id).where(WishlistItem.active_key == key, WishlistItem.id != item.id))
+    if duplicate:
+        raise HTTPException(409, "This filament is already on the wishlist")
+    previous_status = item.status
+    apply_wishlist_input(item, data, user)
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(409, "This filament is already on the wishlist") from exc
+    audit(db, user, "wishlist.updated", "wishlist_item", item.id, {"status": {"old": previous_status, "new": item.status}, "productKey": item.product_key})
+    db.commit()
+    return wishlist_json(item)
+
+
+@app.post("/api/wishlist/{item_id}/archive")
+def archive_wishlist_item(item_id: uuid.UUID, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    item = db.get(WishlistItem, item_id, with_for_update=True)
+    if not item or item.archived:
+        raise HTTPException(404, "Wishlist item not found")
+    item.archived = True
+    item.active_key = None
+    item.updated_by_id = user.id
+    item.updated_at = now_utc()
+    audit(db, user, "wishlist.archived", "wishlist_item", item.id, {"productKey": item.product_key})
+    db.commit()
+    return {"ok": True}
+
+
+@app.post("/api/wishlist/{item_id}/convert-to-spool", status_code=201)
+def convert_wishlist_to_spool(item_id: uuid.UUID, data: WishlistConvertInput, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    item = db.get(WishlistItem, item_id, with_for_update=True)
+    if not item or item.archived:
+        raise HTTPException(404, "Wishlist item not found")
+    weight_mg = grams_to_mg(data.initial_weight_g)
+    if weight_mg < 0:
+        raise HTTPException(422, "Initial filament inventory cannot be negative")
+    length_mm = data.initial_length_m * 1000 if data.initial_length_m is not None else weight_mg_to_length_mm(weight_mg, data.diameter_mm, data.density_g_cm3)
+    spool = Spool(
+        code=next_code(db, Spool, "SPL"), brand=data.brand.strip(), material_name=data.material_name.strip(), material_type=data.material_type.strip(),
+        color_name=data.color_name.strip() or nearest_color(data.color_hex)[0], color_hex=data.color_hex, location=data.location.strip(),
+        lot_number=data.lot_number.strip(), serial_number=data.serial_number.strip(), diameter_mm=data.diameter_mm, density_g_cm3=data.density_g_cm3,
+        tare_weight_mg=grams_to_mg(data.tare_weight_g), initial_weight_mg=weight_mg, remaining_weight_mg=weight_mg,
+        initial_length_mm=length_mm, remaining_length_mm=length_mm, low_stock_weight_mg=grams_to_mg(data.low_stock_weight_g),
+        purchase_price_cents=int(data.purchase_price * 100) if data.purchase_price is not None else None, currency=data.currency.upper(),
+        opt_brand_uuid=item.opt_brand_uuid, opt_material_uuid=item.opt_material_uuid, opt_package_uuid=item.opt_package_uuid,
+        opt_container_uuid=item.opt_container_uuid, catalog_snapshot=item.catalog_snapshot,
+    )
+    db.add(spool)
+    db.flush()
+    db.add(InventoryEntry(
+        spool_id=spool.id, kind="INITIAL", weight_delta_mg=weight_mg, length_delta_mm=length_mm,
+        diameter_mm=spool.diameter_mm, density_g_cm3=spool.density_g_cm3, note=f"Created from wishlist: {item.brand} · {item.material_name}", actor_id=user.id,
+    ))
+    item.archived = True
+    item.active_key = None
+    item.updated_by_id = user.id
+    item.updated_at = now_utc()
+    audit(db, user, "spool.created", "spool", spool.id, {"code": spool.code, "wishlistItemId": str(item.id)})
+    audit(db, user, "wishlist.converted_to_spool", "wishlist_item", item.id, {"spoolId": str(spool.id), "spoolCode": spool.code})
+    db.commit()
+    return spool_json(db, spool)
 
 
 @app.get("/api/operational-status")
@@ -1057,7 +1224,7 @@ def export_spools(db: Session = Depends(get_db), user: User = Depends(current_us
 def export_json(db: Session = Depends(get_db), user: User = Depends(admin_user)):
     settings_row = inventory_setting(db)
     payload = {
-        "version": 2,
+        "version": 3,
         "exportedAt": now_utc().isoformat(),
         "spools": [spool_json(db, s) for s in db.scalars(select(Spool)).all()],
         "printers": [printer_json(p) for p in db.scalars(select(Printer).options(selectinload(Printer.tools).selectinload(PrinterTool.loaded_spool))).all()],
@@ -1068,6 +1235,7 @@ def export_json(db: Session = Depends(get_db), user: User = Depends(admin_user))
             {"id": str(row.id), "productKey": row.product_key, "thresholdG": mg_to_grams(row.threshold_mg) if row.threshold_mg is not None else None, "ignored": row.ignored, "productSnapshot": row.product_snapshot}
             for row in db.scalars(select(ReorderRule)).all()
         ],
+        "wishlist": [wishlist_json(row) for row in db.scalars(select(WishlistItem)).all()],
     }
     return Response(json.dumps(payload, indent=2), media_type="application/json", headers={"Content-Disposition": "attachment; filename=filaflow-export.json"})
 

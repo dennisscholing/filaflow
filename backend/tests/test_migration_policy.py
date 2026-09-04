@@ -41,3 +41,12 @@ def test_v050_password_schema_change_is_additive():
     assert upgrade.count('op.add_column("users"') == 2
     assert "drop_" not in upgrade
     assert "alter_column" not in upgrade
+
+
+def test_v060_wishlist_schema_change_is_additive():
+    source = (BACKEND / "alembic" / "versions" / "0007_shared_wishlist.py").read_text(encoding="utf-8")
+    upgrade = source.split("def downgrade", 1)[0]
+    assert upgrade.count("op.create_table(") == 1
+    assert '"wishlist_items"' in upgrade
+    assert "drop_" not in upgrade
+    assert "alter_column" not in upgrade

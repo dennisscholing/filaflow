@@ -16,6 +16,7 @@ import {
   Eye,
   EyeOff,
   GripVertical,
+  Heart,
   Inbox,
   LayoutGrid,
   Layers3,
@@ -77,7 +78,7 @@ import {
   SheetTitle,
 } from '@/components/ui/sheet';
 
-type NavKey = 'overview' | 'spools' | 'printers' | 'jobs' | 'settings';
+type NavKey = 'overview' | 'spools' | 'wishlist' | 'printers' | 'jobs' | 'settings';
 type User = {
   id: string;
   email: string;
@@ -290,6 +291,28 @@ type CatalogItem = {
   opt: Record<string, string | null>;
   raw: Record<string, unknown>;
 };
+type WishlistItem = {
+  id: string;
+  status: 'saved' | 'buy_soon';
+  desiredQuantity: number;
+  note: string;
+  brand: string;
+  materialName: string;
+  materialType: string;
+  colorName: string;
+  colorHex: string;
+  diameterMm: number;
+  density: number;
+  nominalWeightG: number | null;
+  nominalLengthM: number | null;
+  tareWeightG: number | null;
+  catalogSnapshot: Record<string, unknown>;
+  productKey: string;
+  archived: boolean;
+  openPrintTag: { brandUuid: string | null; materialUuid: string | null; packageUuid: string | null; containerUuid: string | null };
+  createdAt: string;
+  updatedAt: string;
+};
 
 function csrfToken() {
   return (
@@ -348,6 +371,7 @@ export function FilaFlowApp() {
   const [spools, setSpools] = useState<Spool[]>([]);
   const [printers, setPrinters] = useState<Printer[]>([]);
   const [jobs, setJobs] = useState<Job[]>([]);
+  const [wishlist, setWishlist] = useState<WishlistItem[]>([]);
   const [active, setActive] = useState<NavKey>('overview');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -362,16 +386,18 @@ export function FilaFlowApp() {
   const jobIdsRef = useRef<Set<string> | null>(null);
 
   const refresh = useCallback(async () => {
-    const [dash, spoolRows, printerRows, jobRows] = await Promise.all([
+    const [dash, spoolRows, printerRows, jobRows, wishlistRows] = await Promise.all([
       api<Dashboard>('/api/dashboard'),
       api<Spool[]>('/api/spools'),
       api<Printer[]>('/api/printers'),
       api<Job[]>('/api/jobs'),
+      api<WishlistItem[]>('/api/wishlist'),
     ]);
     setDashboard(dash);
     setSpools(spoolRows);
     setPrinters(printerRows);
     setJobs(jobRows);
+    setWishlist(wishlistRows);
     setSelectedJob((current) => current ? jobRows.find((row) => row.id === current.id) ?? current : null);
     const nextOpen = new Set(jobRows.filter((job) => ['NEW', 'MAPPED', 'NEEDS_REVIEW'].includes(job.status)).map((job) => job.id));
     if (jobIdsRef.current) {
@@ -469,6 +495,7 @@ export function FilaFlowApp() {
   const nav: Array<[NavKey, string, typeof CircleGauge]> = [
     ['overview', 'Overview', CircleGauge],
     ['spools', 'Spools', Layers3],
+    ['wishlist', 'Wishlist', Heart],
     ['printers', 'Printers', PrinterIcon],
     ['jobs', 'Print inbox', Inbox],
     ['settings', 'Settings', Settings],
@@ -490,6 +517,11 @@ export function FilaFlowApp() {
                 {key === 'jobs' && openJobs.length > 0 && (
                   <span className="ml-auto rounded-full bg-orange-500 px-2 py-0.5 text-[10px] text-white">
                     {openJobs.length}
+                  </span>
+                )}
+                {key === 'wishlist' && wishlist.some((item) => item.status === 'buy_soon') && (
+                  <span className="ml-auto rounded-full bg-orange-500 px-2 py-0.5 text-[10px] text-white">
+                    {wishlist.filter((item) => item.status === 'buy_soon').length}
                   </span>
                 )}
               </button>
@@ -555,6 +587,7 @@ export function FilaFlowApp() {
                 onRefresh={refresh}
               />
             )}
+            {active === 'wishlist' && <WishlistView items={wishlist} onRefresh={refresh} />}
             {active === 'jobs' && (
               <JobsView jobs={jobs} onSelect={setSelectedJob} />
             )}
@@ -583,6 +616,7 @@ export function FilaFlowApp() {
             <Icon className="size-4" />
             {label}
             {key === 'jobs' && openJobs.length > 0 && <span className="absolute ml-5 -mt-5 rounded-full bg-orange-500 px-1.5 text-[9px] text-white">{openJobs.length}</span>}
+            {key === 'wishlist' && wishlist.some((item) => item.status === 'buy_soon') && <span className="absolute ml-5 -mt-5 rounded-full bg-orange-500 px-1.5 text-[9px] text-white">{wishlist.filter((item) => item.status === 'buy_soon').length}</span>}
           </button>
         ))}
       </nav>
@@ -1077,6 +1111,148 @@ function Empty({ text }: { text: string }) {
       {text}
     </div>
   );
+}
+
+function wishlistPayload(item: WishlistItem, status = item.status) {
+  return {
+    status,
+    desired_quantity: item.desiredQuantity,
+    note: item.note,
+    brand: item.brand,
+    material_name: item.materialName,
+    material_type: item.materialType,
+    color_name: item.colorName,
+    color_hex: item.colorHex,
+    diameter_mm: item.diameterMm,
+    density_g_cm3: item.density,
+    nominal_weight_g: item.nominalWeightG,
+    nominal_length_m: item.nominalLengthM,
+    tare_weight_g: item.tareWeightG,
+    opt_brand_uuid: item.openPrintTag.brandUuid,
+    opt_material_uuid: item.openPrintTag.materialUuid,
+    opt_package_uuid: item.openPrintTag.packageUuid,
+    opt_container_uuid: item.openPrintTag.containerUuid,
+    catalog_snapshot: item.catalogSnapshot,
+  };
+}
+
+function WishlistView({ items, onRefresh }: { items: WishlistItem[]; onRefresh: () => Promise<void> }) {
+  const [query, setQuery] = useState('');
+  const [status, setStatus] = useState('');
+  const [brand, setBrand] = useState('');
+  const [material, setMaterial] = useState('');
+  const [adding, setAdding] = useState(false);
+  const [editing, setEditing] = useState<WishlistItem | null>(null);
+  const [converting, setConverting] = useState<WishlistItem | null>(null);
+  const [message, setMessage] = useState('');
+  const [error, setError] = useState('');
+  const brands = useMemo(() => [...new Set(items.map((item) => item.brand))].sort((a, b) => a.localeCompare(b)), [items]);
+  const materials = useMemo(() => [...new Set(items.map((item) => item.materialType))].sort((a, b) => a.localeCompare(b)), [items]);
+  const filtered = useMemo(() => items.filter((item) => {
+    const tokens = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    const haystack = `${item.brand} ${item.materialName} ${item.materialType} ${item.colorName} ${item.colorHex} ${item.note}`.toLowerCase();
+    return tokens.every((token) => haystack.includes(token)) && (!status || item.status === status) && (!brand || item.brand === brand) && (!material || item.materialType === material);
+  }), [brand, items, material, query, status]);
+  async function changeStatus(item: WishlistItem) {
+    setError(''); setMessage('');
+    try {
+      const next = item.status === 'buy_soon' ? 'saved' : 'buy_soon';
+      await api(`/api/wishlist/${item.id}`, { method: 'PUT', body: JSON.stringify(wishlistPayload(item, next)) });
+      setMessage(next === 'buy_soon' ? 'Added to Buy soon.' : 'Saved for later.');
+      await onRefresh();
+    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Could not update wishlist'); }
+  }
+  async function archive(item: WishlistItem) {
+    if (!window.confirm(`Remove ${item.brand} · ${item.materialName} from the wishlist?`)) return;
+    setError(''); setMessage('');
+    try {
+      await api(`/api/wishlist/${item.id}/archive`, { method: 'POST' });
+      setMessage('Wishlist item removed.');
+      await onRefresh();
+    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Could not remove wishlist item'); }
+  }
+  return <div className="space-y-5">
+    <section className="rounded-2xl border bg-card p-4 shadow-sm">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
+        <div className="relative min-w-0 flex-1"><Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" /><Input className="h-10 pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search wishlist" /></div>
+        <div className="grid grid-cols-3 gap-2 lg:flex">
+          <NativeSelect aria-label="Filter by wishlist status" value={status} onChange={(event) => setStatus(event.target.value)}><NativeSelectOption value="">All statuses</NativeSelectOption><NativeSelectOption value="saved">Saved</NativeSelectOption><NativeSelectOption value="buy_soon">Buy soon</NativeSelectOption></NativeSelect>
+          <NativeSelect aria-label="Filter wishlist by brand" value={brand} onChange={(event) => setBrand(event.target.value)}><NativeSelectOption value="">All brands</NativeSelectOption>{brands.map((value) => <NativeSelectOption key={value} value={value}>{value}</NativeSelectOption>)}</NativeSelect>
+          <NativeSelect aria-label="Filter wishlist by material" value={material} onChange={(event) => setMaterial(event.target.value)}><NativeSelectOption value="">All materials</NativeSelectOption>{materials.map((value) => <NativeSelectOption key={value} value={value}>{value}</NativeSelectOption>)}</NativeSelect>
+        </div>
+        <Button onClick={() => setAdding(true)}><Plus className="size-4" /> Add filament</Button>
+      </div>
+    </section>
+    {error && <p className="text-sm text-destructive">{error}</p>}
+    {message && <p className="text-sm text-emerald-600">{message}</p>}
+    <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+      {filtered.map((item) => <article key={item.id} className="rounded-2xl border bg-card p-4 shadow-sm">
+        <div className="flex items-start gap-3">
+          <span className="size-12 shrink-0 rounded-xl border" style={{ background: item.colorHex }} />
+          <div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><p className="truncate font-semibold">{item.brand} · {item.materialName}</p><Badge variant={item.status === 'buy_soon' ? 'default' : 'secondary'}>{item.status === 'buy_soon' ? 'Buy soon' : 'Saved'}</Badge></div><p className="mt-1 text-xs text-muted-foreground">{item.materialType} · {item.colorName || item.colorHex} · {item.diameterMm} mm</p></div>
+        </div>
+        <div className="mt-4 grid grid-cols-2 gap-2 text-sm"><div className="rounded-xl bg-muted/60 p-3"><p className="text-[11px] text-muted-foreground">Wanted</p><p className="font-bold">{item.desiredQuantity} {item.desiredQuantity === 1 ? 'spool' : 'spools'}</p></div><div className="rounded-xl bg-muted/60 p-3"><p className="text-[11px] text-muted-foreground">Nominal content</p><p className="font-bold">{item.nominalWeightG == null ? '—' : formatWeight(item.nominalWeightG)}</p></div></div>
+        {item.note && <p className="mt-3 whitespace-pre-wrap text-sm text-muted-foreground">{item.note}</p>}
+        <div className="mt-4 flex flex-wrap gap-2"><Button size="sm" onClick={() => setConverting(item)}><Plus className="size-3.5" /> Add spool</Button><Button size="sm" variant="outline" onClick={() => void changeStatus(item)}>{item.status === 'buy_soon' ? 'Save for later' : 'Buy soon'}</Button><DropdownMenu><DropdownMenuTrigger render={<Button size="icon-sm" variant="ghost" aria-label={`Actions for ${item.materialName}`} />}><Ellipsis className="size-4" /></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onClick={() => setEditing(item)}><Pencil className="size-4" /> Edit</DropdownMenuItem><DropdownMenuItem className="text-destructive" onClick={() => void archive(item)}><Archive className="size-4" /> Remove</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>
+      </article>)}
+      {!filtered.length && <Empty text={items.length ? 'No wishlist items match these filters.' : 'No filament saved yet.'} />}
+    </div>
+    {(adding || editing) && <WishlistItemDialog key={editing?.id ?? 'new'} item={editing} open onOpenChange={(open) => { if (!open) { setAdding(false); setEditing(null); } }} onSaved={async () => { setAdding(false); setEditing(null); setMessage(editing ? 'Wishlist item updated.' : 'Filament added to wishlist.'); await onRefresh(); }} />}
+    {converting && <WishlistConvertDialog key={converting.id} item={converting} open onOpenChange={(open) => !open && setConverting(null)} onSaved={async (spool) => { setConverting(null); setMessage(`${spool.code} added; wishlist item removed.`); await onRefresh(); }} />}
+  </div>;
+}
+
+function WishlistItemDialog({ item, open, onOpenChange, onSaved }: { item: WishlistItem | null; open: boolean; onOpenChange: (open: boolean) => void; onSaved: () => Promise<void> }) {
+  const [query, setQuery] = useState('');
+  const [catalog, setCatalog] = useState<CatalogItem[]>([]);
+  const [picked, setPicked] = useState<CatalogItem | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [searched, setSearched] = useState(false);
+  const [error, setError] = useState('');
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (query.trim().length >= 2 && !picked) {
+        setSearching(true);
+        api<CatalogItem[]>(`/api/catalog/search?q=${encodeURIComponent(query)}&limit=60`).then((rows) => { setCatalog(rows); setSearched(true); }).catch(() => setCatalog([])).finally(() => setSearching(false));
+      } else if (query.trim().length < 2) { setCatalog([]); setSearched(false); }
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [picked, query]);
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const f = new FormData(event.currentTarget);
+    const identity = picked ? { opt_brand_uuid: picked.opt.brandUuid, opt_material_uuid: picked.opt.materialUuid, opt_package_uuid: picked.opt.packageUuid, opt_container_uuid: picked.opt.containerUuid, catalog_snapshot: picked.raw } : item ? { opt_brand_uuid: item.openPrintTag.brandUuid, opt_material_uuid: item.openPrintTag.materialUuid, opt_package_uuid: item.openPrintTag.packageUuid, opt_container_uuid: item.openPrintTag.containerUuid, catalog_snapshot: item.catalogSnapshot } : {};
+    setSaving(true); setError('');
+    try {
+      await api(item ? `/api/wishlist/${item.id}` : '/api/wishlist', { method: item ? 'PUT' : 'POST', body: JSON.stringify({
+        status: f.get('status'), desired_quantity: Number(f.get('desiredQuantity')), note: f.get('note'), brand: f.get('brand'), material_name: f.get('materialName'), material_type: f.get('materialType'), color_name: f.get('colorName'), color_hex: f.get('colorHex'), diameter_mm: Number(f.get('diameterMm')), density_g_cm3: Number(f.get('density')), nominal_weight_g: f.get('nominalWeightG') ? Number(f.get('nominalWeightG')) : null, nominal_length_m: f.get('nominalLengthM') ? Number(f.get('nominalLengthM')) : null, tare_weight_g: f.get('tareWeightG') ? Number(f.get('tareWeightG')) : null, ...identity,
+      }) });
+      await onSaved();
+    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Could not save wishlist item'); }
+    finally { setSaving(false); }
+  }
+  const source = picked ?? item;
+  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-2xl"><DialogHeader><DialogTitle>{item ? 'Edit wishlist item' : 'Add to wishlist'}</DialogTitle><DialogDescription className="sr-only">Search OpenPrintTag or enter a filament manually.</DialogDescription></DialogHeader>
+    <div className="space-y-2"><Label htmlFor="wishlist-catalog-search">Search OpenPrintTag</Label><Input id="wishlist-catalog-search" value={query} onChange={(event) => { setQuery(event.target.value); setPicked(null); }} placeholder="Brand, material, color, tag or GTIN" />{searching && <p className="text-xs text-muted-foreground">Searching…</p>}{catalog.length > 0 && !picked && <div className="max-h-64 overflow-auto rounded-xl border p-1">{catalog.map((row) => <button key={row.id} type="button" aria-label={`Select ${row.brand} ${row.materialName}`} onClick={() => { setPicked(row); setQuery(`${row.brand} ${row.materialName}`); setCatalog([]); }} className="flex w-full items-center gap-3 rounded-lg p-2 text-left hover:bg-muted"><span className="size-7 shrink-0 rounded-lg border" style={{ background: row.colorHex }} /><div className="min-w-0"><p className="truncate text-sm font-semibold">{row.brand} · {row.materialName}</p><p className="text-xs text-muted-foreground">{row.materialType} · {row.nominalWeightG ?? '?'} g · {row.colorHex.toUpperCase()}</p></div></button>)}</div>}{!searching && searched && !catalog.length && !picked && <p className="text-xs text-muted-foreground">No matching OpenPrintTag material found. Enter it manually below.</p>}{picked && <div className="flex items-center justify-between rounded-xl border bg-muted/40 px-3 py-2"><p className="truncate text-sm font-semibold">{picked.brand} · {picked.materialName}</p><Button type="button" size="sm" variant="ghost" onClick={() => { setPicked(null); setQuery(''); }}>Clear</Button></div>}</div>
+    <form key={picked?.id ?? item?.id ?? 'manual'} onSubmit={submit} className="grid gap-4 sm:grid-cols-2"><div className="space-y-2"><Label htmlFor="wishlist-status">Status</Label><select id="wishlist-status" name="status" defaultValue={item?.status ?? 'saved'} className="h-9 w-full rounded-lg border bg-background px-3 text-sm"><option value="saved">Saved</option><option value="buy_soon">Buy soon</option></select></div><Field label="Wanted quantity" name="desiredQuantity" type="number" min="1" max="99" step="1" defaultValue={item?.desiredQuantity ?? 1} required />
+      <Field label="Brand" name="brand" defaultValue={source?.brand ?? 'Generic'} required /><Field label="Filament name" name="materialName" defaultValue={source?.materialName ?? ''} required /><Field label="Material type" name="materialType" defaultValue={source?.materialType ?? 'PLA'} required /><ColorInputs defaultName={source?.colorName ?? ''} defaultHex={source?.colorHex ?? '#808080'} /><Field label="Diameter (mm)" name="diameterMm" type="number" min="0.001" step="0.001" defaultValue={source?.diameterMm ?? 1.75} required /><Field label="Density (g/cm³)" name="density" type="number" min="0.0001" step="0.0001" defaultValue={source?.density ?? 1.24} required /><Field label="Nominal weight (g)" name="nominalWeightG" type="number" min="0" step="0.1" defaultValue={source?.nominalWeightG ?? ''} /><Field label="Nominal length (m)" name="nominalLengthM" type="number" min="0" step="0.001" defaultValue={source?.nominalLengthM ?? ''} /><Field label="Spool tare (g)" name="tareWeightG" type="number" min="0" step="0.1" defaultValue={source?.tareWeightG ?? ''} /><div className="space-y-2 sm:col-span-2"><Label htmlFor="wishlist-note">Note</Label><textarea id="wishlist-note" name="note" maxLength={2000} defaultValue={item?.note ?? ''} className="min-h-24 w-full rounded-lg border bg-background px-3 py-2 text-sm" /></div>{error && <p className="text-sm text-destructive sm:col-span-2">{error}</p>}<DialogFooter className="sm:col-span-2"><Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button><Button type="submit" disabled={saving}>{saving ? 'Saving…' : 'Save'}</Button></DialogFooter>
+    </form>
+  </DialogContent></Dialog>;
+}
+
+function WishlistConvertDialog({ item, open, onOpenChange, onSaved }: { item: WishlistItem; open: boolean; onOpenChange: (open: boolean) => void; onSaved: (spool: Spool) => Promise<void> }) {
+  const [error, setError] = useState('');
+  const [saving, setSaving] = useState(false);
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); const f = new FormData(event.currentTarget); setSaving(true); setError('');
+    try {
+      const spool = await api<Spool>(`/api/wishlist/${item.id}/convert-to-spool`, { method: 'POST', body: JSON.stringify({ brand: f.get('brand'), material_name: f.get('materialName'), material_type: f.get('materialType'), color_name: f.get('colorName'), color_hex: f.get('colorHex'), location: f.get('location'), lot_number: f.get('lotNumber'), serial_number: f.get('serialNumber'), diameter_mm: Number(f.get('diameterMm')), density_g_cm3: Number(f.get('density')), tare_weight_g: Number(f.get('tareWeightG')), initial_weight_g: Number(f.get('initialWeightG')), initial_length_m: f.get('initialLengthM') ? Number(f.get('initialLengthM')) : null, low_stock_weight_g: Number(f.get('lowStockWeightG')), purchase_price: f.get('purchasePrice') ? Number(f.get('purchasePrice')) : null, currency: formText(f, 'currency').toUpperCase() || 'EUR' }) });
+      await onSaved(spool);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Could not add spool'); }
+    finally { setSaving(false); }
+  }
+  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-2xl"><DialogHeader><DialogTitle>Add spool from wishlist</DialogTitle><DialogDescription>{item.brand} · {item.materialName} will be removed from the active wishlist after the spool is created.</DialogDescription></DialogHeader><form onSubmit={submit} className="grid gap-4 sm:grid-cols-2"><Field label="Brand" name="brand" defaultValue={item.brand} required /><Field label="Filament name" name="materialName" defaultValue={item.materialName} required /><Field label="Material type" name="materialType" defaultValue={item.materialType} required /><ColorInputs defaultName={item.colorName} defaultHex={item.colorHex} /><LocationField /><Field label="Spool serial number" name="serialNumber" /><Field label="Lot number" name="lotNumber" /><Field label="Diameter (mm)" name="diameterMm" type="number" min="0.001" step="0.001" defaultValue={item.diameterMm} required /><Field label="Density (g/cm³)" name="density" type="number" min="0.0001" step="0.0001" defaultValue={item.density} required /><Field label="Initial net weight (g)" name="initialWeightG" type="number" min="0" step="0.1" defaultValue={item.nominalWeightG ?? 1000} required /><Field label="Initial length (m, optional)" name="initialLengthM" type="number" min="0" step="0.001" defaultValue={item.nominalLengthM ?? ''} /><Field label="Spool tare (g)" name="tareWeightG" type="number" min="0" step="0.1" defaultValue={item.tareWeightG ?? 0} required /><Field label="Low-stock threshold (g)" name="lowStockWeightG" type="number" min="0" step="1" defaultValue={100} required /><Field label="Purchase price" name="purchasePrice" type="number" min="0" step="0.01" /><Field label="Currency" name="currency" maxLength={3} defaultValue="EUR" required />{error && <p className="text-sm text-destructive sm:col-span-2">{error}</p>}<DialogFooter className="sm:col-span-2"><Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button><Button type="submit" disabled={saving}>{saving ? 'Adding…' : 'Add spool'}</Button></DialogFooter></form></DialogContent></Dialog>;
 }
 
 function SpoolsView({

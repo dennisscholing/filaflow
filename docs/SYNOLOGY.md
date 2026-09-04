@@ -171,10 +171,19 @@ Fully unattended updating would require a privileged host task or a container wi
 For a controlled image pin or rollback, add this line to `.env` and rebuild the project:
 
 ```dotenv
-FILAFLOW_IMAGE=ghcr.io/dennisscholing/filaflow:v0.2.0
+FILAFLOW_IMAGE=ghcr.io/dennisscholing/filaflow:v0.5.2
 ```
 
-Remove the line later to follow `latest` again. If the failed update changed the schema, restore its verified `backups/pre-upgrade` dump before starting the older image. Reverting only the image may be unsafe after a database migration.
+Remove the line later to follow `latest` again. Reverting only the image may be unsafe after a database migration because every FilaFlow image accepts only its exact schema revision.
+
+The v0.6.0 migration adds only `wishlist_items`. To roll back from v0.6.0 to v0.5.2 without restoring the full database, first make a manual backup, stop normal application traffic, and run this while the v0.6.0 image is still configured:
+
+```sh
+docker compose stop app backup
+docker compose run --rm --no-deps --entrypoint sh app -c 'cd /app/backend && python -m alembic downgrade 0006_user_password_security'
+```
+
+This removes wishlist entries only; existing users, spools, ledger, jobs, printers, and loadouts stay intact. Then set `FILAFLOW_IMAGE=ghcr.io/dennisscholing/filaflow:v0.5.2`, rebuild, and start the project. If a database problem is suspected, use the verified pre-upgrade dump instead of a schema downgrade.
 
 ### If a migration stops startup
 

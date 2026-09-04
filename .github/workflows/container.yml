@@ -59,6 +59,30 @@ jobs:
           python -m alembic upgrade head
           cd ..
           python backend/tests/upgrade_fixture.py verify
+      - name: Test v0.5.2 upgrade, repeat, and schema rollback
+        run: |
+          python - <<'PY'
+          import psycopg
+          with psycopg.connect("postgresql://filaflow:test-database-password@127.0.0.1:5432/filaflow_test", autocommit=True) as connection:
+              connection.execute("CREATE DATABASE filaflow_v052_test")
+          PY
+          export FILAFLOW_DATABASE_URL=postgresql+psycopg://filaflow:test-database-password@127.0.0.1:5432/filaflow_v052_test
+          cd backend
+          python -m alembic upgrade 0006_user_password_security
+          cd ..
+          python backend/tests/upgrade_fixture.py seed
+          cd backend
+          python -m alembic upgrade head
+          cd ..
+          python backend/tests/upgrade_fixture.py verify
+          cd backend
+          python -m alembic upgrade head
+          cd ..
+          python backend/tests/upgrade_fixture.py verify
+          cd backend
+          python -m alembic downgrade 0006_user_password_security
+          cd ..
+          python backend/tests/upgrade_fixture.py verify-rollback
       - run: python -m pytest backend/tests client/prusa-hook/test_hook.py -q -p no:cacheprovider
       - run: docker compose --env-file .env.example config --quiet
 
@@ -80,7 +104,6 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository_owner }}/filaflow
           tags: |
-            type=raw,value=candidate
             type=sha
       - uses: docker/build-push-action@v6
         with:

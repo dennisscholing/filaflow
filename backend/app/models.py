@@ -237,4 +237,34 @@ class ReorderRule(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
 
 
+class WishlistItem(Base):
+    __tablename__ = "wishlist_items"
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid7)
+    product_key: Mapped[str] = mapped_column(String(500), index=True)
+    active_key: Mapped[str | None] = mapped_column(String(500), unique=True, index=True)
+    status: Mapped[str] = mapped_column(String(20), default="saved", index=True)
+    desired_quantity: Mapped[int] = mapped_column(Integer, default=1)
+    note: Mapped[str] = mapped_column(Text, default="")
+    brand: Mapped[str] = mapped_column(String(120), default="Generic")
+    material_name: Mapped[str] = mapped_column(String(160))
+    material_type: Mapped[str] = mapped_column(String(40), default="PLA")
+    color_name: Mapped[str] = mapped_column(String(80), default="")
+    color_hex: Mapped[str] = mapped_column(String(9), default="#808080")
+    diameter_mm: Mapped[Decimal] = mapped_column(Numeric(6, 3), default=Decimal("1.75"))
+    density_g_cm3: Mapped[Decimal] = mapped_column(Numeric(7, 4), default=Decimal("1.24"))
+    nominal_weight_mg: Mapped[int | None] = mapped_column(Integer)
+    nominal_length_mm: Mapped[Decimal | None] = mapped_column(Numeric(16, 3))
+    tare_weight_mg: Mapped[int | None] = mapped_column(Integer)
+    opt_brand_uuid: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    opt_material_uuid: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    opt_package_uuid: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    opt_container_uuid: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    catalog_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    archived: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    created_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    updated_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, onupdate=now_utc)
+
+
 Index("ix_spool_active_material", Spool.archived, Spool.material_type)

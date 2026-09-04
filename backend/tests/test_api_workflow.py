@@ -1,6 +1,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
+import app.main as main_module
 from app.main import app
 
 
@@ -485,3 +486,99 @@ def test_password_change_admin_reset_and_session_invalidation():
         assert reset.status_code == 200 and reset.json()["mustChangePassword"] is True
         assert operator.get("/api/auth/me").status_code == 401
         assert operator.get("/api/printers", headers={"Authorization": f"Bearer {token.json()['token']}"}).status_code == 200
+
+
+def test_shared_wishlist_does_not_change_inventory_and_converts_atomically(monkeypatch):
+    with TestClient(app) as client:
+        login = client.post("/api/auth/login", json={"email": "admin@test.local", "password": "test-password-123"})
+        assert login.status_code == 200, login.text
+        csrf = {"X-CSRF-Token": login.json()["csrf"]}
+        dashboard_before = client.get("/api/dashboard").json()["summary"]
+        reorder_before = client.get("/api/inventory/reorder-suggestions?all=true").json()
+        payload = {
+            "status": "saved", "desired_quantity": 2, "note": "Open spool outside inventory",
+            "brand": "Wishlist Test Brand", "material_name": "Ocean Blue PETG", "material_type": "PETG",
+            "color_name": "Ocean Blue", "color_hex": "#0055AA", "diameter_mm": 1.75, "density_g_cm3": 1.27,
+            "nominal_weight_g": 1000, "nominal_length_m": 300, "tare_weight_g": 220,
+            "opt_brand_uuid": "00000000-0000-7000-8000-000000000201",
+            "opt_material_uuid": "00000000-0000-7000-8000-000000000202",
+            "opt_package_uuid": "00000000-0000-7000-8000-000000000203",
+            "opt_container_uuid": "00000000-0000-7000-8000-000000000204",
+            "catalog_snapshot": {"source": "test", "color": "#0055AA"},
+        }
+        created = client.post("/api/wishlist", headers=csrf, json=payload)
+        assert created.status_code == 201, created.text
+        item = created.json()
+        assert item["desiredQuantity"] == 2
+        assert item["openPrintTag"]["materialUuid"] == payload["opt_material_uuid"]
+        assert client.post("/api/wishlist", headers=csrf, json=payload).status_code == 409
+        assert client.get("/api/dashboard").json()["summary"] == dashboard_before
+        assert client.get("/api/inventory/reorder-suggestions?all=true").json() == reorder_before
+
+        payload["status"] = "buy_soon"
+        payload["desired_quantity"] = 3
+        updated = client.put(f"/api/wishlist/{item['id']}", headers=csrf, json=payload)
+        assert updated.status_code == 200, updated.text
+        assert updated.json()["status"] == "buy_soon"
+        filtered = client.get("/api/wishlist", params={"status": "buy_soon", "brand": payload["brand"], "material": "PETG"})
+        assert [row["id"] for row in filtered.json()] == [item["id"]]
+        exported = client.get("/api/export/backup.json")
+        assert exported.status_code == 200
+        assert any(row["id"] == item["id"] for row in exported.json()["wishlist"])
+
+        converted = client.post(
+            f"/api/wishlist/{item['id']}/convert-to-spool", headers=csrf,
+            json={
+                "brand": payload["brand"], "material_name": payload["material_name"], "material_type": "PETG",
+                "color_name": payload["color_name"], "color_hex": payload["color_hex"], "diameter_mm": 1.75,
+                "density_g_cm3": 1.27, "tare_weight_g": 220, "initial_weight_g": 1000,
+                "initial_length_m": 300, "low_stock_weight_g": 100, "currency": "EUR",
+            },
+        )
+        assert converted.status_code == 201, converted.text
+        spool = converted.json()
+        assert spool["openPrintTag"]["materialUuid"] == payload["opt_material_uuid"]
+        assert all(row["id"] != item["id"] for row in client.get("/api/wishlist").json())
+        assert any(row["id"] == item["id"] for row in client.get("/api/wishlist", params={"archived": "true"}).json())
+        assert client.get(f"/api/spools/{spool['id']}").json()["ledger"][0]["kind"] == "INITIAL"
+
+        failed_item = client.post("/api/wishlist", headers=csrf, json={
+            "brand": "Rollback Brand", "material_name": "Rollback PLA", "material_type": "PLA", "color_hex": "#123456"
+        }).json()
+        spools_before_failure = {row["id"] for row in client.get("/api/spools").json()}
+        real_audit = main_module.audit
+
+        def fail_after_spool_creation(db, actor, action, entity_type, entity_id, details=None):
+            if action == "wishlist.converted_to_spool":
+                raise RuntimeError("forced conversion failure")
+            return real_audit(db, actor, action, entity_type, entity_id, details)
+
+        monkeypatch.setattr(main_module, "audit", fail_after_spool_creation)
+        with pytest.raises(RuntimeError, match="forced conversion failure"):
+            client.post(f"/api/wishlist/{failed_item['id']}/convert-to-spool", headers=csrf, json={
+                "brand": "Rollback Brand", "material_name": "Rollback PLA", "material_type": "PLA", "initial_weight_g": 1000
+            })
+        monkeypatch.setattr(main_module, "audit", real_audit)
+        assert any(row["id"] == failed_item["id"] for row in client.get("/api/wishlist").json())
+        assert {row["id"] for row in client.get("/api/spools").json()} == spools_before_failure
+
+        account = client.post("/api/users", headers=csrf, json={
+            "email": "wishlist-operator@filaflow.local", "display_name": "Wishlist operator",
+            "password": "wishlist-password-123", "role": "operator",
+        })
+        assert account.status_code == 201, account.text
+        with TestClient(app) as operator:
+            operator_login = operator.post("/api/auth/login", json={
+                "email": "wishlist-operator@filaflow.local", "password": "wishlist-password-123",
+            })
+            operator_csrf = {"X-CSRF-Token": operator_login.json()["csrf"]}
+            changed_password = operator.put("/api/account/password", headers=operator_csrf, json={
+                "current_password": "wishlist-password-123", "new_password": "wishlist-permanent-123",
+            })
+            assert changed_password.status_code == 200, changed_password.text
+            operator_csrf = {"X-CSRF-Token": operator.cookies.get("filaflow_csrf")}
+            shared = operator.post("/api/wishlist", headers=operator_csrf, json={
+                "brand": "Shared Brand", "material_name": "Shared ABS", "material_type": "ABS", "color_hex": "#445566",
+            })
+            assert shared.status_code == 201, shared.text
+            assert operator.post(f"/api/wishlist/{shared.json()['id']}/archive", headers=operator_csrf).status_code == 200
