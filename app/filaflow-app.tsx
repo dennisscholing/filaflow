@@ -562,11 +562,13 @@ export function FilaFlowApp() {
             {active === 'overview' && dashboard && (
               <Overview
                 dashboard={dashboard}
+                wishlist={wishlist}
                 preference={user.preferredUnit}
                 onNavigate={navigate}
                 onJob={setSelectedJob}
                 onAddSpool={() => { setSpoolTemplate(null); setSpoolDialog(true); }}
                 onAddPrinter={() => setPrinterDialog(true)}
+                onRefresh={refresh}
               />
             )}
             {active === 'spools' && (
@@ -757,18 +759,22 @@ function CatalogStatus() {
 
 function Overview({
   dashboard,
+  wishlist,
   preference,
   onNavigate,
   onJob,
   onAddSpool,
   onAddPrinter,
+  onRefresh,
 }: {
   dashboard: Dashboard;
+  wishlist: WishlistItem[];
   preference: User['preferredUnit'];
   onNavigate: (key: NavKey) => void;
   onJob: (job: Job) => void;
   onAddSpool: () => void;
   onAddPrinter: () => void;
+  onRefresh: () => Promise<void>;
 }) {
   const s = dashboard.summary;
   const metrics = [
@@ -822,7 +828,7 @@ function Overview({
       </section>
       <div className="grid gap-6 xl:grid-cols-2">
         <AttentionPanel status={dashboard.attention} summary={dashboard.summary} onNavigate={onNavigate} />
-        <ReorderPanel reorder={dashboard.reorder} onNavigate={onNavigate} />
+        <ReorderPanel reorder={dashboard.reorder} wishlist={wishlist} onNavigate={onNavigate} onRefresh={onRefresh} />
       </div>
       <div className="grid gap-6 xl:grid-cols-[1.35fr_.65fr]">
         <section className="rounded-2xl border bg-card shadow-sm">
@@ -921,12 +927,26 @@ function AttentionPanel({ status, summary, onNavigate }: { status: OperationalSt
   );
 }
 
-function ReorderPanel({ reorder, onNavigate }: { reorder: ReorderPayload; onNavigate: (key: NavKey) => void }) {
+function ReorderPanel({ reorder, wishlist, onNavigate, onRefresh }: { reorder: ReorderPayload; wishlist: WishlistItem[]; onNavigate: (key: NavKey) => void; onRefresh: () => Promise<void> }) {
+  const buySoon = wishlist.filter((item) => item.status === 'buy_soon');
+  const [converting, setConverting] = useState<WishlistItem | null>(null);
+  const [message, setMessage] = useState('');
+  const [error, setError] = useState('');
+  async function saveForLater(item: WishlistItem) {
+    setMessage(''); setError('');
+    try {
+      await api(`/api/wishlist/${item.id}`, { method: 'PUT', body: JSON.stringify(wishlistPayload(item, 'saved')) });
+      setMessage(`${item.materialName} saved for later.`);
+      await onRefresh();
+    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Could not update wishlist'); }
+  }
   return (
     <section className="rounded-2xl border bg-card shadow-sm">
-      <PanelHeader title="Reorder suggestions" action={`${reorder.groups.length} products`} onClick={() => onNavigate('spools')} />
+      <PanelHeader title="Reorder suggestions" action={`${reorder.groups.length + buySoon.length} items`} onClick={() => onNavigate(buySoon.length ? 'wishlist' : 'spools')} />
+      {(message || error) && <p className={`border-b px-5 py-2 text-xs ${error ? 'text-destructive' : 'text-emerald-600'}`}>{error || message}</p>}
+      <div className="border-b bg-muted/30 px-5 py-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Low available stock · automatic</div>
       <div className="divide-y">
-        {reorder.groups.length ? reorder.groups.slice(0, 5).map((group) => (
+        {reorder.groups.length ? reorder.groups.slice(0, 3).map((group) => (
           <div key={group.productKey} className="flex items-center gap-3 px-5 py-3">
             <span className="size-8 shrink-0 rounded-lg border" style={{ background: group.colorHex }} />
             <div className="min-w-0 flex-1"><p className="truncate text-sm font-semibold">{group.brand} · {group.materialName}</p><p className="text-xs text-muted-foreground">{group.spoolCount} spools · {formatWeight(group.availableWeightG)} available</p></div>
@@ -934,6 +954,17 @@ function ReorderPanel({ reorder, onNavigate }: { reorder: ReorderPayload; onNavi
           </div>
         )) : <Empty text={`All products are above ${formatWeight(reorder.defaultThresholdG)}.`} />}
       </div>
+      <div className="border-y bg-muted/30 px-5 py-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Wishlist · manually marked</div>
+      <div className="divide-y">
+        {buySoon.length ? buySoon.slice(0, 3).map((item) => (
+          <div key={item.id} className="flex flex-wrap items-center gap-3 px-5 py-3">
+            <span className="size-8 shrink-0 rounded-lg border" style={{ background: item.colorHex }} />
+            <div className="min-w-40 flex-1"><p className="truncate text-sm font-semibold">{item.brand} · {item.materialName}</p><p className="text-xs text-muted-foreground">{item.materialType} · {item.diameterMm} mm · {item.desiredQuantity} wanted</p></div>
+            <div className="flex gap-1"><Button size="sm" onClick={() => setConverting(item)}><Plus className="size-3.5" /> Add spool</Button><Button size="sm" variant="ghost" onClick={() => void saveForLater(item)}>Save for later</Button></div>
+          </div>
+        )) : <Empty text="No wishlist items marked Buy soon." />}
+      </div>
+      {converting && <WishlistConvertDialog key={converting.id} item={converting} open onOpenChange={(open) => !open && setConverting(null)} onSaved={async (spool) => { setConverting(null); setError(''); setMessage(`${spool.code} added; wishlist item removed.`); await onRefresh(); }} />}
     </section>
   );
 }
